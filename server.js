@@ -230,6 +230,46 @@ const getFileStats = async (filePath) => {
     }
 };
 
+// Set proper permissions for files and directories (so nginx can read them)
+const setFilePermissions = async (filePath) => {
+    try {
+        const stats = await fs.stat(filePath);
+        if (stats.isDirectory()) {
+            // Directories need 755 (rwxr-xr-x) - executable for traversal
+            await fs.chmod(filePath, 0o755);
+        } else {
+            // Files need 644 (rw-r--r--) - readable by all
+            await fs.chmod(filePath, 0o644);
+        }
+    } catch (err) {
+        console.error(`Error setting permissions for ${filePath}:`, err.message);
+    }
+};
+
+// Recursively set permissions for a directory and all its contents
+const setDirectoryPermissions = async (dirPath) => {
+    try {
+        // Set permission for the directory itself
+        await setFilePermissions(dirPath);
+        
+        // Recursively set permissions for all contents
+        const entries = await fs.readdir(dirPath);
+        for (const entry of entries) {
+            const fullPath = path.join(dirPath, entry);
+            const stats = await getFileStats(fullPath);
+            if (stats) {
+                if (stats.isDirectory) {
+                    await setDirectoryPermissions(fullPath);
+                } else {
+                    await setFilePermissions(fullPath);
+                }
+            }
+        }
+    } catch (err) {
+        console.error(`Error setting directory permissions for ${dirPath}:`, err.message);
+    }
+};
+
 const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -365,14 +405,35 @@ app.post('/api/upload', requireAuth, upload.array('files'), async (req, res) => 
             return res.status(400).json({ error: 'No valid files to upload' });
         }
 
-        const uploadedFiles = req.files
-            .filter(file => file.size > 0) // Only include actual files, not folders
-            .map(file => ({
-                name: file.filename,
-                size: formatFileSize(file.size),
-                path: path.relative(STORAGE_DIR, file.path).replace(/\\/g, '/')
-            }));
+        // Process uploaded files and set permissions
+        const uploadedFiles = [];
+        for (const file of req.files) {
+            if (file.size > 0) {
+                // Set permissions for the uploaded file
+                await setFilePermissions(file.path);
+                
+                // Ensure parent directories have correct permissions (755 for traversal)
+                let currentDir = path.dirname(file.path);
+                while (currentDir !== STORAGE_DIR && currentDir.length > STORAGE_DIR.length) {
+                    try {
+                        await setFilePermissions(currentDir);
+                        currentDir = path.dirname(currentDir);
+                    } catch (err) {
+                        break; // Stop if we can't access parent directory
+                    }
+                }
 
+                uploadedFiles.push({
+                    name: file.filename,
+                    size: formatFileSize(file.size),
+                    path: path.relative(STORAGE_DIR, file.path).replace(/\\/g, '/')
+                });
+            }
+        }
+
+        if (uploadedFiles.length === 0) {
+            return res.status(400).json({ error: 'No valid files to upload' });
+        }
 
         res.json({
             message: 'Files uploaded successfully',
@@ -413,13 +474,25 @@ app.get('/api/download', requireAuth, async (req, res) => {
         const filename = path.basename(fullPath);
         const mimeType = mime.lookup(filename) || 'application/octet-stream';
         
-        // Set headers for optimized download
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        // Check if this is a preview request (inline display) or download request
+        const isPreview = req.query.preview === 'true';
+        const isThumbnail = req.query.thumbnail === 'true';
+        
+        // Set headers for optimized download or inline preview/thumbnail
+        res.setHeader('Content-Disposition', (isPreview || isThumbnail)
+            ? `inline; filename="${filename}"` 
+            : `attachment; filename="${filename}"`);
         res.setHeader('Content-Type', mimeType);
         res.setHeader('Content-Length', stats.size);
         
-        // Cache headers for better performance (24 hours for files)
-        res.setHeader('Cache-Control', 'private, max-age=86400');
+        // Cache headers for better performance
+        if (isThumbnail) {
+            // Longer cache for thumbnails (30 days)
+            res.setHeader('Cache-Control', 'private, max-age=2592000');
+        } else {
+            // 24 hours for regular files
+            res.setHeader('Cache-Control', 'private, max-age=86400');
+        }
         res.setHeader('ETag', `"${stats.size}-${stats.modified.getTime()}"`);
         
         // Handle range requests for large files (partial content support)
@@ -490,6 +563,8 @@ app.post('/api/mkdir', requireAuth, async (req, res) => {
         }
 
         await fs.ensureDir(fullPath);
+        // Set proper permissions for the new directory
+        await setFilePermissions(fullPath);
         res.json({ message: 'Directory created successfully' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to create directory' });
@@ -658,6 +733,7 @@ app.post('/api/copy', requireAuth, async (req, res) => {
         }
 
         fs.ensureDirSync(destPath);
+        await setFilePermissions(destPath);
 
         for (const filePath of files) {
             const sourcePath = path.join(STORAGE_DIR, filePath);
@@ -670,7 +746,14 @@ app.post('/api/copy', requireAuth, async (req, res) => {
             }
 
             if (fs.existsSync(sourcePath)) {
+                const stats = await getFileStats(sourcePath);
                 fs.copySync(sourcePath, targetPath);
+                // Set permissions for copied file/directory
+                if (stats && stats.isDirectory) {
+                    await setDirectoryPermissions(targetPath);
+                } else {
+                    await setFilePermissions(targetPath);
+                }
             }
         }
 
@@ -697,6 +780,7 @@ app.post('/api/move', requireAuth, async (req, res) => {
         }
 
         fs.ensureDirSync(destPath);
+        await setFilePermissions(destPath);
 
         for (const filePath of files) {
             const sourcePath = path.join(STORAGE_DIR, filePath);
@@ -709,7 +793,14 @@ app.post('/api/move', requireAuth, async (req, res) => {
             }
 
             if (fs.existsSync(sourcePath)) {
+                const stats = await getFileStats(sourcePath);
                 fs.moveSync(sourcePath, targetPath);
+                // Set permissions for moved file/directory
+                if (stats && stats.isDirectory) {
+                    await setDirectoryPermissions(targetPath);
+                } else {
+                    await setFilePermissions(targetPath);
+                }
             }
         }
 
@@ -814,6 +905,229 @@ app.post('/api/compress', requireAuth, async (req, res) => {
     }
 });
 
+// Helper function to encode spaces and special characters in URL paths
+function encodeUrlPath(urlPath) {
+    // Split by /, encode each segment, then join back
+    return urlPath.split('/').map(segment => {
+        // Skip empty segments
+        if (!segment) return segment;
+        // Encode spaces and other special characters
+        return encodeURIComponent(segment);
+    }).join('/');
+}
+
+// Helper function to convert relative paths to absolute paths based on HTML file location
+// Handles paths at any depth: ./file.png, ./subdir/file.png, ./subdir/subdir2/file.png, ../file.png, etc.
+function convertToAbsolutePath(relativePath, htmlFilePath) {
+    // Get the directory path relative to STORAGE_DIR
+    // This gives us the path from storage root to the HTML file's directory
+    // Example: if htmlFilePath is STORAGE_DIR/lyx/1-6-26/index.html
+    // relativeDir will be "lyx/1-6-26"
+    const htmlDir = path.dirname(htmlFilePath);
+    const relativeDir = path.relative(STORAGE_DIR, htmlDir).replace(/\\/g, '/');
+    
+    // If already absolute (starts with /), return as-is (but normalize)
+    if (relativePath.startsWith('/')) {
+        return relativePath.replace(/\/+/g, '/');
+    }
+    
+    // Normalize the relative path
+    let normalizedPath = relativePath;
+    
+    // Remove ./ prefix if present
+    if (normalizedPath.startsWith('./')) {
+        normalizedPath = normalizedPath.substring(2);
+    }
+    
+    // Handle parent directory references (../, ../../, etc.)
+    if (normalizedPath.startsWith('../')) {
+        // Build the full path from STORAGE_DIR
+        // Start from the HTML file's directory
+        let currentDir = relativeDir;
+        
+        // Process each ../ level
+        let remainingPath = normalizedPath;
+        while (remainingPath.startsWith('../')) {
+            // Go up one directory level
+            if (currentDir === '' || currentDir === '.') {
+                // Can't go above root, stop here
+                currentDir = '';
+                break;
+            }
+            currentDir = path.dirname(currentDir).replace(/\\/g, '/');
+            // Handle root directory case
+            if (currentDir === '.' || currentDir === '') {
+                currentDir = '';
+            }
+            remainingPath = remainingPath.substring(3);
+        }
+        
+        // Build the absolute path
+        const absolutePath = currentDir 
+            ? `/${currentDir}/${remainingPath}`.replace(/\/+/g, '/')
+            : `/${remainingPath}`.replace(/\/+/g, '/');
+        return absolutePath;
+    }
+    
+    // Handle relative paths (same directory or subdirectories)
+    // Examples: "file.png", "subdir/file.png", "subdir/subdir2/file.png"
+    // Convert to absolute path by prepending the HTML file's directory
+    if (relativeDir && relativeDir !== '.') {
+        const absolutePath = `/${relativeDir}/${normalizedPath}`.replace(/\/+/g, '/');
+        return absolutePath;
+    } else {
+        // HTML file is in root directory
+        const absolutePath = `/${normalizedPath}`.replace(/\/+/g, '/');
+        return absolutePath;
+    }
+}
+
+// Helper function to fix HTML files by converting absolute URLs to absolute paths and encoding spaces
+async function fixHtmlFiles(directory) {
+    try {
+        const files = fs.readdirSync(directory, { withFileTypes: true });
+        
+        for (const file of files) {
+            const fullPath = path.join(directory, file.name);
+            
+            if (file.isDirectory()) {
+                // Recursively process subdirectories
+                await fixHtmlFiles(fullPath);
+            } else if (file.isFile() && (file.name.endsWith('.html') || file.name.endsWith('.htm') || file.name.endsWith('.css'))) {
+                // Read HTML/CSS file
+                let content = fs.readFileSync(fullPath, 'utf8');
+                let modified = false;
+                
+                // Fix absolute URLs in src, href attributes (only for your domain)
+                // Pattern: src="https://creative.reachableads.com/lyx/full_animation/Comp_M_1.png" -> src="/lyx/1-6-26/full%20animation/Comp_M_1.png"
+                // Keep external URLs (CDN, etc.) unchanged
+                content = content.replace(/(src|href)\s*=\s*["']https?:\/\/([^\/]+)(\/[^"']*)["']/gi, (match, attr, domain, filePath) => {
+                    // Only convert URLs from your domain
+                    if (domain === 'creative.reachableads.com' || domain === 'www.creative.reachableads.com') {
+                        modified = true;
+                        // Encode spaces in the path
+                        const encodedPath = encodeUrlPath(filePath);
+                        return `${attr}="${encodedPath}"`;
+                    }
+                    return match;
+                });
+                
+                // Fix absolute URLs in CSS url() functions (only for your domain)
+                // Pattern: url(https://creative.reachableads.com/path/file.png) -> url(/path/file.png)
+                content = content.replace(/url\s*\(\s*["']?https?:\/\/([^\/]+)(\/[^"')]*)["']?\s*\)/gi, (match, domain, filePath) => {
+                    // Only convert URLs from your domain
+                    if (domain === 'creative.reachableads.com' || domain === 'www.creative.reachableads.com') {
+                        modified = true;
+                        const encodedPath = encodeUrlPath(filePath);
+                        return `url(${encodedPath})`;
+                    }
+                    return match;
+                });
+                
+                // Fix absolute URLs in JavaScript strings (only for your domain)
+                // Pattern: "https://creative.reachableads.com/path/file.png" -> "/path/file.png"
+                content = content.replace(/(["'])(https?:\/\/([^\/]+))(\/[^"']*)\1/g, (match, quote, fullDomain, domain, filePath) => {
+                    // Only convert URLs from your domain
+                    if (domain === 'creative.reachableads.com' || domain === 'www.creative.reachableads.com') {
+                        modified = true;
+                        const encodedPath = encodeUrlPath(filePath);
+                        return `${quote}${encodedPath}${quote}`;
+                    }
+                    return match;
+                });
+                
+                // Fix relative paths - convert to absolute paths and encode spaces
+                // Handles all directory depths: 1 level, 2 levels, 3+ levels, parent references, etc.
+                // Examples:
+                //   - src="./file.png" -> src="/lyx/1-6-26/file.png"
+                //   - src="./subdir/file.png" -> src="/lyx/1-6-26/subdir/file.png"
+                //   - src="./subdir/subdir2/file.png" -> src="/lyx/1-6-26/subdir/subdir2/file.png"
+                //   - src="./full animation/image.png" -> src="/lyx/1-6-26/full%20animation/image.png"
+                //   - src="../file.png" -> src="/lyx/file.png"
+                //   - src="../../file.png" -> src="/file.png"
+                // Only for HTML files (not CSS, as CSS paths are relative to CSS file location)
+                if (file.name.endsWith('.html') || file.name.endsWith('.htm')) {
+                    content = content.replace(/(src|href)\s*=\s*["']([^"']+)["']/gi, (match, attr, urlPath) => {
+                        // Skip if already absolute URL, data URI, or special protocol
+                        if (urlPath.startsWith('http://') || urlPath.startsWith('https://') || 
+                            urlPath.startsWith('data:') || urlPath.startsWith('mailto:') || 
+                            urlPath.startsWith('#') || urlPath.startsWith('javascript:') ||
+                            urlPath.startsWith('blob:')) {
+                            return match;
+                        }
+                        
+                        // Convert relative paths to absolute paths (handles any depth)
+                        const absolutePath = convertToAbsolutePath(urlPath, fullPath);
+                        // Encode spaces and special characters
+                        const encodedPath = encodeUrlPath(absolutePath);
+                        
+                        // Modify if path changed (always convert relative to absolute for accessibility)
+                        if (encodedPath !== urlPath) {
+                            modified = true;
+                            return `${attr}="${encodedPath}"`;
+                        }
+                        return match;
+                    });
+                }
+                
+                // Fix paths in CSS url() functions - encode spaces in relative paths
+                if (file.name.endsWith('.css')) {
+                    content = content.replace(/url\s*\(\s*["']?([^"')]+)["']?\s*\)/gi, (match, urlPath) => {
+                        // Skip if already absolute URL or data URI
+                        if (urlPath.startsWith('http://') || urlPath.startsWith('https://') || 
+                            urlPath.startsWith('data:')) {
+                            return match;
+                        }
+                        
+                        // Encode spaces in relative paths
+                        if (urlPath.includes(' ')) {
+                            modified = true;
+                            const encodedPath = encodeUrlPath(urlPath);
+                            return `url(${encodedPath})`;
+                        }
+                        return match;
+                    });
+                }
+                
+                if (modified) {
+                    fs.writeFileSync(fullPath, content, 'utf8');
+                    const fileType = file.name.endsWith('.css') ? 'CSS' : 'HTML';
+                    console.log(`Fixed ${fileType} file: ${fullPath}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`Error fixing HTML files in ${directory}:`, error);
+    }
+}
+
+// Fix HTML files in a directory (convert absolute URLs to relative paths)
+app.post('/api/fix-html', requireAuth, async (req, res) => {
+    try {
+        const { directory } = req.body;
+        if (!directory) {
+            return res.status(400).json({ error: 'Directory path required' });
+        }
+
+        const fullDirPath = path.join(STORAGE_DIR, directory);
+        
+        // Security check
+        if (!fullDirPath.startsWith(STORAGE_DIR)) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+
+        if (!fs.existsSync(fullDirPath)) {
+            return res.status(404).json({ error: 'Directory not found' });
+        }
+
+        await fixHtmlFiles(fullDirPath);
+        res.json({ message: 'HTML files fixed successfully' });
+    } catch (error) {
+        console.error('Fix HTML error:', error);
+        res.status(500).json({ error: 'Fix HTML failed: ' + error.message });
+    }
+});
+
 // Extract archive
 app.post('/api/extract', requireAuth, async (req, res) => {
     try {
@@ -835,13 +1149,25 @@ app.post('/api/extract', requireAuth, async (req, res) => {
         }
 
         fs.ensureDirSync(destPath);
+        await setFilePermissions(destPath);
 
         const stream = fs.createReadStream(fullArchivePath);
         const extract = unzipper.Extract({ path: destPath });
 
         stream.pipe(extract);
 
-        extract.on('close', () => {
+        extract.on('close', async () => {
+            // Set permissions for all extracted files and directories
+            await setDirectoryPermissions(destPath);
+            
+            // Fix HTML files to convert absolute URLs to relative paths
+            try {
+                await fixHtmlFiles(destPath);
+            } catch (fixError) {
+                console.error('Error fixing HTML files:', fixError);
+                // Don't fail the extraction if HTML fixing fails
+            }
+            
             res.json({ message: 'Archive extracted successfully' });
         });
 
@@ -855,15 +1181,138 @@ app.post('/api/extract', requireAuth, async (req, res) => {
     }
 });
 
-// Serve React app for all non-API routes (SPA fallback)
-// MUST be last - after all API routes
+// Serve static files from storage directory (for direct HTML preview and assets)
+// This allows accessing files like /apex/index.html directly
+// MUST be before the catch-all route but after API routes
+app.get('*', async (req, res, next) => {
+  // Skip API routes, login, service worker, manifest, and root
+  // Note: express.static middleware for dist/public runs first and will serve those files
+  // This route only handles files that don't exist in dist/public
+  if (req.path.startsWith('/api/') || 
+      req.path === '/login' || 
+      req.path === '/sw.js' || 
+      req.path === '/manifest.json' ||
+      req.path === '/') {
+    return next(); // Let other routes handle these
+  }
+
+  try {
+    // Remove leading slash and decode the path
+    let requestedPath = decodeURIComponent(req.path).replace(/^\//, '');
+    
+    // Security: Prevent directory traversal
+    if (requestedPath.includes('..') || requestedPath.includes('\\')) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const fullPath = path.join(STORAGE_DIR, requestedPath);
+    
+    // Security check - ensure path is within STORAGE_DIR
+    if (!fullPath.startsWith(STORAGE_DIR)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const stats = await getFileStats(fullPath);
+    
+    if (!stats) {
+      return next(); // File not found, let catch-all handle it
+    }
+
+    if (stats.isDirectory) {
+      // If it's a directory, try to serve index.html
+      const indexPath = path.join(fullPath, 'index.html');
+      const indexStats = await getFileStats(indexPath);
+      
+      if (indexStats && indexStats.isFile) {
+        // Serve index.html from the directory
+        const mimeType = mime.lookup('index.html') || 'text/html';
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+        
+        const fileStream = fs.createReadStream(indexPath);
+        fileStream.pipe(res);
+        return;
+      } else {
+        // Directory without index.html - return 404 or list files
+        return next();
+      }
+    }
+
+    if (stats.isFile) {
+      // Serve the file
+      const filename = path.basename(fullPath);
+      const mimeType = mime.lookup(filename) || 'application/octet-stream';
+      
+      // Set appropriate headers
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Length', stats.size);
+      
+      // Cache headers for static assets
+      if (mimeType.startsWith('text/html')) {
+        // HTML files - shorter cache, allow revalidation
+        res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate'); // 5 minutes
+      } else if (mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
+        // Media files - longer cache
+        res.setHeader('Cache-Control', 'public, max-age=86400'); // 24 hours
+      } else if (mimeType.includes('css') || mimeType.includes('javascript') || mimeType.includes('json')) {
+        // CSS/JS files - medium cache
+        res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour
+      } else {
+        // Other files
+        res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour
+      }
+      
+      // Handle range requests for large files
+      const range = req.headers.range;
+      if (range) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+        const chunksize = (end - start) + 1;
+        
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': mimeType,
+        });
+        
+        const fileStream = fs.createReadStream(fullPath, { start, end });
+        fileStream.pipe(res);
+      } else {
+        // Stream the entire file
+        const fileStream = fs.createReadStream(fullPath);
+        fileStream.pipe(res);
+      }
+      return;
+    }
+
+    // If we get here, something unexpected happened
+    return next();
+  } catch (error) {
+    console.error('Static file serve error:', error);
+    return next(); // Let catch-all handle errors
+  }
+});
+
+// Final catch-all route - handles requests that don't match any other route
+// This runs after the storage file serving route (which calls next() if file not found)
 app.get('*', (req, res) => {
-  // Serve index.html for all other routes (React Router handles client-side routing)
-  const indexPath = path.join(__dirname, 'dist', 'index.html');
-  if (fs.existsSync(indexPath)) {
-    res.redirect(302, 'https://creative.reachableads.com');
+  // If this is a file request (has extension), return 404
+  // Otherwise, redirect to frontend for React app routes
+  const hasExtension = /\.[^/]+$/.test(req.path);
+  
+  if (hasExtension) {
+    // File not found - return 404
+    res.status(404).json({ error: 'File not found' });
   } else {
-    res.status(404).send('Please go to https://creative.reachableads.com to access the file manager');
+    // Likely a React app route - redirect to frontend
+    const indexPath = path.join(__dirname, 'dist', 'index.html');
+    if (fs.existsSync(indexPath)) {
+      res.redirect(302, 'https://creative.reachableads.com');
+    } else {
+      res.status(404).send('Please go to https://creative.reachableads.com to access the file manager');
+    }
   }
 });
 

@@ -3,8 +3,15 @@ import {
   Folder, File, Image, Video, Music, FileText, Code, 
   Archive, ChevronRight, MoreHorizontal, PackageOpen 
 } from 'lucide-react'
+import FileThumbnail from './FileThumbnail'
 
 const FileList = ({ files, selectedFiles, isLoading, onFileClick, onFileDoubleClick, onFileContextMenu, onUnzip }) => {
+  const shouldShowThumbnail = (file) => {
+    if (file.type === 'directory') return false
+    const mimeType = file.mimeType || ''
+    return mimeType.startsWith('image/') || mimeType.startsWith('video/')
+  }
+
   const getFileIcon = (file) => {
     if (file.type === 'directory') {
       return <Folder className="w-5 h-5 text-primary-500" />
@@ -116,9 +123,24 @@ const FileList = ({ files, selectedFiles, isLoading, onFileClick, onFileDoubleCl
                   <div className="w-2 h-2 bg-primary-600 rounded-full flex-shrink-0"></div>
                 )}
                 
-                {/* File icon */}
-                <div className="flex-shrink-0">
-                  {getFileIcon(file)}
+                {/* File icon or thumbnail */}
+                <div className="flex-shrink-0 w-10 h-10 flex items-center justify-center overflow-hidden rounded bg-gray-100 dark:bg-gray-700">
+                  {shouldShowThumbnail(file) ? (
+                    <FileThumbnail
+                      file={file}
+                      size={80}
+                      className="w-full h-full object-cover"
+                      fallback={
+                        <div className="w-full h-full flex items-center justify-center">
+                          {getFileIcon(file)}
+                        </div>
+                      }
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      {getFileIcon(file)}
+                    </div>
+                  )}
                 </div>
                 
                 {/* File name */}

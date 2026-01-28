@@ -220,6 +220,18 @@ fi
 echo -e "${GREEN}✓ Permissions set (dist and storage directories)${NC}"
 echo ""
 
+# Step 9.5: Setup symlinks for nginx access
+echo -e "${YELLOW}Step 9.5: Setting up symlinks for nginx access...${NC}"
+if [ -f "$PROJECT_DIR/setup-symlinks.sh" ]; then
+    chmod +x "$PROJECT_DIR/setup-symlinks.sh"
+    bash "$PROJECT_DIR/setup-symlinks.sh"
+    echo -e "${GREEN}✓ Symlinks setup complete${NC}"
+else
+    echo -e "${YELLOW}⚠ Symlink setup script not found - skipping${NC}"
+    echo -e "${YELLOW}  Run manually: sudo bash $PROJECT_DIR/setup-symlinks.sh${NC}"
+fi
+echo ""
+
 # Step 10: Configure/update nginx for frontend and backend
 echo -e "${YELLOW}Step 10: Configuring nginx for frontend and backend...${NC}"
 
@@ -237,15 +249,43 @@ if [ -f "$NGINX_FRONTEND_SITE" ] && grep -q "ssl_certificate" "$NGINX_FRONTEND_S
 fi
 
 if [ "$FRONTEND_SSL_CONFIGURED" = true ]; then
-    # SSL exists - only update non-SSL parts
+    # SSL exists - backup current config
     cp "$NGINX_FRONTEND_SITE" "$NGINX_FRONTEND_SITE.backup"
-    if ! grep -q "root /root/projects/Server-File-Manager/mainFile/dist" "$NGINX_FRONTEND_SITE" 2>/dev/null; then
-        sed -i "s|root .*;|root /root/projects/Server-File-Manager/mainFile/dist;|g" "$NGINX_FRONTEND_SITE" 2>/dev/null || true
+    
+    # Check if creative directory serving is already configured
+    if ! grep -q "@react_fallback" "$NGINX_FRONTEND_SITE" 2>/dev/null; then
+        # New location blocks for creative directory not present - need to add them
+        echo -e "${YELLOW}Updating frontend nginx config with creative directory serving...${NC}"
+        
+        # Copy new config template
+        cp "$PROJECT_DIR/$NGINX_FRONTEND_CONFIG" "$NGINX_FRONTEND_SITE"
+        
+        # Try to restore SSL configuration automatically using certbot
+        if command -v certbot &> /dev/null; then
+            echo -e "${YELLOW}Restoring SSL configuration with certbot...${NC}"
+            certbot --nginx -d "$FRONTEND_DOMAIN" --non-interactive --quiet --redirect 2>/dev/null && {
+                echo -e "${GREEN}✓ SSL configuration restored${NC}"
+            } || {
+                echo -e "${YELLOW}⚠ Certbot restore failed - SSL may need manual configuration${NC}"
+                echo -e "${YELLOW}  You can restore from backup: cp $NGINX_FRONTEND_SITE.backup $NGINX_FRONTEND_SITE${NC}"
+                echo -e "${YELLOW}  Or run manually: certbot --nginx -d $FRONTEND_DOMAIN${NC}"
+            }
+        else
+            echo -e "${YELLOW}⚠ Certbot not found - SSL configuration not restored${NC}"
+            echo -e "${YELLOW}  Restore from backup or run: certbot --nginx -d $FRONTEND_DOMAIN${NC}"
+        fi
+        
+        echo -e "${GREEN}✓ Frontend nginx config updated with creative directory serving${NC}"
+    else
+        # Creative directory serving already configured - just update basic settings if needed
+        if ! grep -q "root /root/projects/Server-File-Manager/mainFile/dist" "$NGINX_FRONTEND_SITE" 2>/dev/null; then
+            sed -i "s|root .*;|root /root/projects/Server-File-Manager/mainFile/dist;|g" "$NGINX_FRONTEND_SITE" 2>/dev/null || true
+        fi
+        if ! grep -q "server_name ${FRONTEND_DOMAIN}" "$NGINX_FRONTEND_SITE" 2>/dev/null; then
+            sed -i "s|server_name .*;|server_name ${FRONTEND_DOMAIN};|g" "$NGINX_FRONTEND_SITE" 2>/dev/null || true
+        fi
+        echo -e "${GREEN}✓ Frontend nginx config updated (SSL preserved)${NC}"
     fi
-    if ! grep -q "server_name ${FRONTEND_DOMAIN}" "$NGINX_FRONTEND_SITE" 2>/dev/null; then
-        sed -i "s|server_name .*;|server_name ${FRONTEND_DOMAIN};|g" "$NGINX_FRONTEND_SITE" 2>/dev/null || true
-    fi
-    echo -e "${GREEN}✓ Frontend nginx config updated (SSL preserved)${NC}"
 else
     cp "$PROJECT_DIR/$NGINX_FRONTEND_CONFIG" "$NGINX_FRONTEND_SITE"
     echo -e "${GREEN}✓ Frontend nginx config copied${NC}"

@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+import { getFileUrl } from '../utils/apiUtils'
 
 export const useFileManager = () => {
   // State
@@ -20,7 +21,9 @@ export const useFileManager = () => {
   const loadFiles = useCallback(async (path = currentPath) => {
     setIsLoading(true)
     try {
-      const response = await axios.get(`/api/files?path=${encodeURIComponent(path)}`)
+      // Ensure path is a string (handle case where event object is passed)
+      const pathString = typeof path === 'string' ? path : currentPath
+      const response = await axios.get(`/api/files?path=${encodeURIComponent(pathString)}`)
       setFiles(response.data.items || [])
       setCurrentPath(response.data.path)
       setSelectedFiles(new Set())
@@ -35,8 +38,9 @@ export const useFileManager = () => {
 
   // Navigate to path
   const navigateToPath = useCallback(async (path) => {
-    setCurrentPath(path)
-    await loadFiles(path)
+    // Normalize path: remove leading/trailing slashes, but keep empty string for root
+    const normalizedPath = path ? path.replace(/^\/+|\/+$/g, '') : ''
+    await loadFiles(normalizedPath)
     setSelectedFiles(new Set())
   }, [loadFiles])
 
@@ -91,10 +95,149 @@ export const useFileManager = () => {
 
   const downloadFile = useCallback(async (filePath) => {
     try {
-      window.open(`/api/download?path=${encodeURIComponent(filePath)}`, '_blank')
+      // Use proper API URL construction - ensure it uses the API domain
+      const downloadUrl = getFileUrl(filePath, false)
+      
+      console.log('Downloading file:', filePath)
+      console.log('Download URL:', downloadUrl)
+      
+      // Show loading toast
+      const loadingToast = toast.loading('Preparing download...')
+      
+      // Use fetch with credentials to ensure authentication cookies are sent
+      const response = await fetch(downloadUrl, {
+        method: 'GET',
+        credentials: 'include', // Include cookies for authentication
+        headers: {
+          'Accept': '*/*', // Accept any content type
+        },
+      })
+      
+      console.log('Download response status:', response.status, response.statusText)
+      console.log('Download response headers:', {
+        'content-type': response.headers.get('content-type'),
+        'content-disposition': response.headers.get('content-disposition'),
+        'content-length': response.headers.get('content-length'),
+      })
+      
+      if (!response.ok) {
+        const errorText = await response.text()
+        let errorMessage = `Download failed: ${response.statusText}`
+        try {
+          const errorJson = JSON.parse(errorText)
+          errorMessage = errorJson.error || errorMessage
+        } catch {
+          // If not JSON, use the text or status text
+          if (errorText) errorMessage = errorText
+        }
+        toast.dismiss(loadingToast)
+        throw new Error(errorMessage)
+      }
+      
+      // Get the filename from Content-Disposition header or use the path
+      const contentDisposition = response.headers.get('Content-Disposition')
+      let filename = filePath.split('/').pop() || 'download'
+      
+      if (contentDisposition) {
+        // Try to extract filename from Content-Disposition header
+        // Handles both quoted and unquoted filenames, including filename*=UTF-8'' format
+        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/)
+        if (filenameMatch && filenameMatch[1]) {
+          filename = filenameMatch[1].replace(/['"]/g, '').trim()
+          // Decode URI if needed
+          try {
+            filename = decodeURIComponent(filename)
+          } catch {
+            // If decoding fails, use as-is
+          }
+        }
+        // Also check for filename*=UTF-8'' format
+        const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/)
+        if (utf8Match && utf8Match[1]) {
+          try {
+            filename = decodeURIComponent(utf8Match[1])
+          } catch {
+            // If decoding fails, keep previous filename
+          }
+        }
+      }
+      
+      console.log('Downloading file as:', filename)
+      
+      // Create blob and download
+      const blob = await response.blob()
+      
+      console.log('Blob created:', {
+        size: blob.size,
+        type: blob.type
+      })
+      
+      // Check if blob is empty
+      if (blob.size === 0) {
+        toast.dismiss(loadingToast)
+        throw new Error('Download failed: Empty file received')
+      }
+      
+      // Check if the response is HTML (likely the frontend page was served instead)
+      const blobType = blob.type || ''
+      if (blobType.includes('text/html')) {
+        // Try to read as text to see if it's an error page
+        const text = await blob.text()
+        if (text.includes('<!DOCTYPE html>') || text.includes('<html') || text.includes('React') || text.includes('root')) {
+          toast.dismiss(loadingToast)
+          throw new Error('Download failed: Received frontend page instead of file. The API endpoint may not be configured correctly.')
+        }
+      }
+      
+      // Check if it's a JSON error response
+      if (blobType.includes('application/json')) {
+        const text = await blob.text()
+        try {
+          const json = JSON.parse(text)
+          if (json.error) {
+            toast.dismiss(loadingToast)
+            throw new Error(json.error)
+          }
+        } catch {
+          // Not an error JSON, continue with download
+        }
+      }
+      
+      // Create download link and trigger download
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      link.style.display = 'none'
+      document.body.appendChild(link)
+      
+      // Trigger download
+      link.click()
+      
+      // Cleanup after a short delay
+      setTimeout(() => {
+        if (link.parentNode) {
+          document.body.removeChild(link)
+        }
+        window.URL.revokeObjectURL(url)
+      }, 200)
+      
+      toast.dismiss(loadingToast)
+      toast.success(`Downloading ${filename}...`)
+      
+      console.log('Download triggered successfully')
     } catch (error) {
       console.error('Download failed:', error)
-      toast.error('Download failed')
+      const errorMessage = error.message || 'Download failed'
+      toast.error(errorMessage)
+      
+      // Log detailed error for debugging
+      console.error('Download error details:', {
+        filePath,
+        downloadUrl: getFileUrl(filePath, false),
+        error: error.message,
+        stack: error.stack
+      })
     }
   }, [])
 

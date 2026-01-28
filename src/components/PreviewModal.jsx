@@ -1,8 +1,56 @@
-import React, { useRef, useEffect } from 'react'
+import React, { useRef, useEffect, useState } from 'react'
 import { X, Download, FileText, Image, File } from 'lucide-react'
+import { getFileUrl, getApiBaseURL } from '../utils/apiUtils'
+import axios from 'axios'
 
 const PreviewModal = ({ file, onClose, onDownload }) => {
   const modalRef = useRef(null)
+  const [previewUrl, setPreviewUrl] = useState(null)
+  const [previewError, setPreviewError] = useState(false)
+  const objectUrlRef = useRef(null)
+
+  // Load preview URL for media files (images, videos, audio)
+  useEffect(() => {
+    if (!file) return
+
+    const mimeType = file.mimeType || ''
+    const isMediaFile = mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/')
+
+    if (isMediaFile && !file.isText) {
+      const loadPreview = async () => {
+        try {
+          const apiBaseURL = getApiBaseURL()
+          const url = `${apiBaseURL}/api/download?path=${encodeURIComponent(file.path)}&preview=true`
+          
+          const response = await axios.get(url, {
+            responseType: 'blob',
+            withCredentials: true
+          })
+
+          const objectUrl = URL.createObjectURL(response.data)
+          objectUrlRef.current = objectUrl
+          setPreviewUrl(objectUrl)
+          setPreviewError(false)
+        } catch (err) {
+          console.error('Preview load error:', err)
+          setPreviewError(true)
+          setPreviewUrl(null)
+        }
+      }
+
+      loadPreview()
+    }
+
+    // Cleanup object URL on unmount
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current)
+        objectUrlRef.current = null
+      }
+      setPreviewUrl(null)
+      setPreviewError(false)
+    }
+  }, [file?.path])
 
   useEffect(() => {
     const handleEscape = (e) => {
@@ -42,57 +90,76 @@ const PreviewModal = ({ file, onClose, onDownload }) => {
 
     // Image files
     if (mimeType.startsWith('image/')) {
+      if (previewError || !previewUrl) {
+        return (
+          <div className="text-center py-8">
+            <Image className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+            <p className="text-gray-500 dark:text-gray-400">Failed to load image preview</p>
+          </div>
+        )
+      }
       return (
         <div className="flex justify-center">
           <img
-            src={`/api/download?path=${encodeURIComponent(file.path)}`}
+            src={previewUrl}
             alt={file.name}
             className="max-w-full max-h-96 rounded-lg shadow-lg"
             onError={(e) => {
+              setPreviewError(true)
               e.target.style.display = 'none'
-              e.target.nextSibling.style.display = 'block'
             }}
           />
-          <div className="hidden text-center text-gray-500 dark:text-gray-400">
-            <Image className="w-16 h-16 mx-auto mb-2" />
-            <p>Image preview failed</p>
-          </div>
         </div>
       )
     }
 
     // Video files
     if (mimeType.startsWith('video/')) {
+      if (previewError || !previewUrl) {
+        return (
+          <div className="text-center py-8">
+            <File className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+            <p className="text-gray-500 dark:text-gray-400">Failed to load video preview</p>
+          </div>
+        )
+      }
       return (
         <div className="flex justify-center">
           <video
             controls
             className="max-w-full max-h-96 rounded-lg shadow-lg"
             onError={(e) => {
+              setPreviewError(true)
               e.target.style.display = 'none'
-              e.target.nextSibling.style.display = 'block'
             }}
           >
-            <source src={`/api/download?path=${encodeURIComponent(file.path)}`} type={mimeType} />
+            <source src={previewUrl} type={mimeType} />
             Your browser does not support video playback.
           </video>
-          <div className="hidden text-center text-gray-500 dark:text-gray-400">
-            <File className="w-16 h-16 mx-auto mb-2" />
-            <p>Video preview not supported</p>
-          </div>
         </div>
       )
     }
 
     // Audio files
     if (mimeType.startsWith('audio/')) {
+      if (previewError || !previewUrl) {
+        return (
+          <div className="text-center py-8">
+            <File className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+            <p className="text-gray-500 dark:text-gray-400">Failed to load audio preview</p>
+          </div>
+        )
+      }
       return (
         <div className="flex justify-center">
           <audio
             controls
             className="w-full max-w-md"
+            onError={() => {
+              setPreviewError(true)
+            }}
           >
-            <source src={`/api/download?path=${encodeURIComponent(file.path)}`} type={mimeType} />
+            <source src={previewUrl} type={mimeType} />
             Your browser does not support audio playback.
           </audio>
         </div>

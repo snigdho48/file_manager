@@ -1,46 +1,53 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { 
   Folder, File, Image, Video, Music, FileText, Code, 
   Archive, Download, Eye, MoreHorizontal, PackageOpen 
 } from 'lucide-react'
+import FileThumbnail from './FileThumbnail'
 
 const FileGrid = ({ files, selectedFiles, isLoading, onFileClick, onFileDoubleClick, onFileContextMenu, onUnzip }) => {
+  const shouldShowThumbnail = (file) => {
+    if (file.type === 'directory') return false
+    const mimeType = file.mimeType || ''
+    return mimeType.startsWith('image/') || mimeType.startsWith('video/')
+  }
+
   const getFileIcon = (file) => {
     if (file.type === 'directory') {
-      return <Folder className="w-8 h-8 text-primary-500" />
+      return <Folder className="w-10 h-10 sm:w-12 sm:h-12 text-primary-500" />
     }
 
     const ext = file.name.split('.').pop()?.toLowerCase() || ''
     const mimeType = file.mimeType || ''
 
     if (mimeType.startsWith('image/')) {
-      return <Image className="w-8 h-8 text-green-500" />
+      return <Image className="w-10 h-10 sm:w-12 sm:h-12 text-green-500" />
     }
     
     if (mimeType.startsWith('video/')) {
-      return <Video className="w-8 h-8 text-purple-500" />
+      return <Video className="w-10 h-10 sm:w-12 sm:h-12 text-purple-500" />
     }
     
     if (mimeType.startsWith('audio/')) {
-      return <Music className="w-8 h-8 text-pink-500" />
+      return <Music className="w-10 h-10 sm:w-12 sm:h-12 text-pink-500" />
     }
     
     const docExts = ['pdf', 'doc', 'docx', 'txt', 'rtf']
     if (docExts.includes(ext)) {
-      return <FileText className="w-8 h-8 text-blue-500" />
+      return <FileText className="w-10 h-10 sm:w-12 sm:h-12 text-blue-500" />
     }
     
     const codeExts = ['js', 'html', 'css', 'py', 'java', 'cpp', 'c', 'php', 'json', 'xml']
     if (codeExts.includes(ext)) {
-      return <Code className="w-8 h-8 text-orange-500" />
+      return <Code className="w-10 h-10 sm:w-12 sm:h-12 text-orange-500" />
     }
     
     const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz']
     if (archiveExts.includes(ext)) {
-      return <Archive className="w-8 h-8 text-yellow-500" />
+      return <Archive className="w-10 h-10 sm:w-12 sm:h-12 text-yellow-500" />
     }
     
-    return <File className="w-8 h-8 text-gray-500" />
+    return <File className="w-10 h-10 sm:w-12 sm:h-12 text-gray-500" />
   }
 
   const formatDate = (dateString) => {
@@ -108,10 +115,25 @@ const FileGrid = ({ files, selectedFiles, isLoading, onFileClick, onFileDoubleCl
           >
             {/* File content */}
             <div className="p-3 sm:p-4 text-center">
-              {/* File icon */}
+              {/* File icon or thumbnail */}
               <div className="flex justify-center mb-2 sm:mb-3">
-                <div className="w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center">
-                  {getFileIcon(file)}
+                <div className="w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center overflow-hidden rounded-lg bg-gray-100 dark:bg-gray-700">
+                  {shouldShowThumbnail(file) ? (
+                    <FileThumbnail
+                      file={file}
+                      size={160}
+                      className="w-full h-full object-cover"
+                      fallback={
+                        <div className="w-full h-full flex items-center justify-center">
+                          {getFileIcon(file)}
+                        </div>
+                      }
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      {getFileIcon(file)}
+                    </div>
+                  )}
                 </div>
               </div>
               

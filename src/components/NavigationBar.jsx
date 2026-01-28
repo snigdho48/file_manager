@@ -45,7 +45,7 @@ const NavigationBar = ({ currentPath, onNavigate, onCreateFolder, onRefresh, vie
       // This will automatically work with nginx proxy and different domains
       const serverOrigin = window.location.origin
       const pathSegment = currentPath ? `/${currentPath}` : ''
-      const fullPath = `${serverOrigin}${pathSegment}`
+      const fullPath = `${serverOrigin}${pathSegment}/`
       
       await navigator.clipboard.writeText(fullPath)
       
@@ -57,7 +57,7 @@ const NavigationBar = ({ currentPath, onNavigate, onCreateFolder, onRefresh, vie
       console.error('Failed to copy path:', error)
       // Fallback for older browsers
       const textArea = document.createElement('textarea')
-      textArea.value = `${window.location.origin}${currentPath ? `/${currentPath}` : ''}`
+      textArea.value = `${window.location.origin}${currentPath ? `/${currentPath}/` : ''}`
       document.body.appendChild(textArea)
       textArea.select()
       document.execCommand('copy')
@@ -67,13 +67,22 @@ const NavigationBar = ({ currentPath, onNavigate, onCreateFolder, onRefresh, vie
 
   const renderBreadcrumbs = () => {
     const breadcrumbs = []
+    const isHomeActive = !currentPath || currentPath === ''
 
     // Home button
     breadcrumbs.push(
       <button
         key="home"
-        onClick={() => onNavigate('')}
-        className="flex items-center px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors duration-200 focus-ring"
+        onClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          onNavigate('')
+        }}
+        className={`flex items-center px-3 py-1.5 text-sm rounded-md transition-colors duration-200 focus-ring ${
+          isHomeActive
+            ? 'text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20 font-medium'
+            : 'text-gray-600 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 hover:bg-gray-100 dark:hover:bg-gray-700'
+        }`}
       >
         <Home className="w-4 h-4 mr-2" />
         Home
@@ -81,19 +90,23 @@ const NavigationBar = ({ currentPath, onNavigate, onCreateFolder, onRefresh, vie
     )
 
     // Path parts
-    let currentBreadcrumbPath = ''
     pathParts.forEach((part, index) => {
-      currentBreadcrumbPath += (index > 0 ? '/' : '') + part
+      // Build path up to this breadcrumb part
+      const currentBreadcrumbPath = pathParts.slice(0, index + 1).join('/')
       const isLast = index === pathParts.length - 1
 
       breadcrumbs.push(
-        <ChevronRight key={`separator-${index}`} className="w-4 h-4 text-gray-400 mx-1" />
+        <ChevronRight key={`separator-${index}`} className="w-4 h-4 text-gray-400 mx-1 flex-shrink-0" />
       )
 
       breadcrumbs.push(
         <button
           key={`part-${index}`}
-          onClick={() => onNavigate(currentBreadcrumbPath)}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            onNavigate(currentBreadcrumbPath)
+          }}
           className={`px-3 py-1.5 text-sm rounded-md transition-colors duration-200 focus-ring ${
             isLast
               ? 'text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20 font-medium'
@@ -248,7 +261,7 @@ const NavigationBar = ({ currentPath, onNavigate, onCreateFolder, onRefresh, vie
 
             {/* Refresh button */}
             <button
-              onClick={onRefresh}
+              onClick={() => onRefresh()}
               className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors duration-200 focus-ring"
               title="Refresh (F5)"
             >

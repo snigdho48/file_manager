@@ -30,9 +30,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), copyPWAFiles()],
-    server: {
+  server: {
       port: devPort,
-      proxy: {
+    proxy: {
         '/api': {
           target: proxyApiUrl,
           changeOrigin: true,
@@ -44,19 +44,19 @@ export default defineConfig(({ mode }) => {
             });
           }
         }
-      }
-    },
-    build: {
-      outDir: 'dist',
-      rollupOptions: {
-        output: {
-          manualChunks: {
-            vendor: ['react', 'react-dom'],
-            router: ['react-router-dom'],
-            utils: ['axios', 'lucide-react']
-          }
+    }
+  },
+  build: {
+    outDir: 'dist',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          router: ['react-router-dom'],
+          utils: ['axios', 'lucide-react']
         }
       }
+    }
     },
     publicDir: 'public'
   }
