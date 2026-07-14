@@ -8,7 +8,7 @@ const copyPWAFiles = () => {
   return {
     name: 'copy-pwa-files',
     writeBundle() {
-      const files = ['sw.js', 'manifest.json', 'icon.png', 'logo.png', 'logo.svg', 'icon.svg', 'favicon.ico', 'config.js']
+      const files = ['sw.js', 'manifest.json', 'icon.png', 'logo.png', 'favicon.ico', 'config.js']
       files.forEach(file => {
         const src = join(__dirname, 'public', file)
         const dest = join(__dirname, 'dist', file)

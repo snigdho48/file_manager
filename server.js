@@ -1591,7 +1591,7 @@ app.use((error, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`🚀 CrowdWork360 File Manager running on http://localhost:${PORT}`);
+    console.log(`🚀 Reachableads File Manager running on http://localhost:${PORT}`);
     console.log(`📁 Storage directory: ${STORAGE_DIR}`);
     if (FRONTEND_URL) console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
     console.log(`🍪 Cookie sameSite=${sessionCookie.sameSite}${COOKIE_DOMAIN ? ` domain=${COOKIE_DOMAIN}` : ' (host-only)'}`);

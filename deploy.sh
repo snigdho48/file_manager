@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================
-# Reachable File Manager — One-Click Deploy
+# Reachableads — One-Click Deploy
 # Asks for your domain, then installs everything.
 # ========================================
 
@@ -20,7 +20,7 @@ STORAGE_DIR="${STORAGE_DIR:-$REPO_ROOT/creative}"
 PUBLIC_WWW="/var/www/creative"
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN} CrowdWork360 — Deployment${NC}"
+echo -e "${GREEN} Reachableads — Deployment${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo -e "Project: ${CYAN}${PROJECT_DIR}${NC}"
@@ -79,19 +79,20 @@ domain_from_url() {
 }
 
 # ---------- Interactive deploy inputs ----------
-# Only one URL — API is same origin at /api
 #   DEPLOY_FRONTEND_URL=https://files.example.com
+#   DEPLOY_BACKEND_URL=https://api.files.example.com   (optional — empty = same as frontend /api)
 EXISTING_FRONTEND_URL="$(read_env_var FRONTEND_URL)"
+EXISTING_BACKEND_URL="$(read_env_var BACKEND_URL)"
 EXISTING_SESSION_SECRET="$(read_env_var SESSION_SECRET)"
 EXISTING_FM_USERNAME="$(read_env_var FM_USERNAME)"
 EXISTING_FM_PASSWORD="$(read_env_var FM_PASSWORD)"
 
-echo -e "${YELLOW}Site URL (API will be the same host under /api)${NC}"
-echo -e "  Example: ${CYAN}DEPLOY_FRONTEND_URL=https://files.example.com${NC}"
-echo -e "  Then API is: ${CYAN}https://files.example.com/api${NC}"
+echo -e "${YELLOW}Site & API URLs${NC}"
+echo -e "  Example frontend: ${CYAN}https://files.example.com${NC}"
+echo -e "  Backend empty → uses frontend URL + ${CYAN}/api${NC}"
 echo ""
 
-# --- DEPLOY_FRONTEND_URL (only prompt) ---
+# --- DEPLOY_FRONTEND_URL ---
 if [ -n "${DEPLOY_FRONTEND_URL:-}" ]; then
     FRONTEND_URL_INPUT="$DEPLOY_FRONTEND_URL"
     echo -e "${GREEN}Using env DEPLOY_FRONTEND_URL=${DEPLOY_FRONTEND_URL}${NC}"
@@ -103,7 +104,6 @@ else
     read -r -p "$(echo -e ${CYAN}DEPLOY_FRONTEND_URL${NC}=)" FRONTEND_URL_INPUT
 fi
 
-# Allow paste like "DEPLOY_FRONTEND_URL=https://..." or just the URL/domain
 FRONTEND_URL_INPUT="$(echo "${FRONTEND_URL_INPUT:-}" | sed -E 's/^DEPLOY_FRONTEND_URL=//; s/[[:space:]]+//g')"
 
 if [ -n "$FRONTEND_URL_INPUT" ]; then
@@ -126,9 +126,61 @@ if [ -z "$FRONTEND_DOMAIN" ]; then
     exit 1
 fi
 
-# Same-origin API — no separate backend domain
-BACKEND_URL="${FRONTEND_URL}/api"
-COOKIE_DOMAIN=""
+# --- DEPLOY_BACKEND_URL (optional) ---
+echo ""
+if [ -n "${DEPLOY_BACKEND_URL:-}" ]; then
+    BACKEND_URL_INPUT="$DEPLOY_BACKEND_URL"
+    echo -e "${GREEN}Using env DEPLOY_BACKEND_URL=${DEPLOY_BACKEND_URL}${NC}"
+else
+    if [ -n "$EXISTING_BACKEND_URL" ]; then
+        echo -e "  Current .env BACKEND_URL: ${CYAN}${EXISTING_BACKEND_URL}${NC}"
+    fi
+    echo -e "  ${YELLOW}Leave empty to use frontend URL as API (same origin /api).${NC}"
+    read -r -p "$(echo -e ${CYAN}DEPLOY_BACKEND_URL${NC}=)" BACKEND_URL_INPUT
+fi
+
+BACKEND_URL_INPUT="$(echo "${BACKEND_URL_INPUT:-}" | sed -E 's/^DEPLOY_BACKEND_URL=//; s/[[:space:]]+//g')"
+
+if [ -n "$BACKEND_URL_INPUT" ]; then
+    BACKEND_BASE="$(normalize_frontend_url "$BACKEND_URL_INPUT")"
+    # Strip trailing /api if user pasted full API path — config.js is origin or path-prefix
+    BACKEND_BASE="$(echo "$BACKEND_BASE" | sed -E 's#/api/?$##')"
+    UPDATE_BACKEND_URL=1
+else
+    # Empty → same as frontend (API at FRONTEND_URL/api via nginx)
+    BACKEND_BASE="$FRONTEND_URL"
+    UPDATE_BACKEND_URL=1
+    echo -e "${GREEN}✓ Backend empty — using frontend URL${NC}"
+fi
+
+BACKEND_DOMAIN="$(domain_from_url "$BACKEND_BASE")"
+SAME_ORIGIN_API=0
+if [ "$BACKEND_DOMAIN" = "$FRONTEND_DOMAIN" ]; then
+    SAME_ORIGIN_API=1
+    BACKEND_URL="${FRONTEND_URL}/api"
+    APP_API_URL=""   # relative /api for axios
+    COOKIE_SAME_SITE_VAL="lax"
+    COOKIE_DOMAIN=""
+else
+    BACKEND_URL="$BACKEND_BASE"
+    APP_API_URL="$BACKEND_BASE"
+    COOKIE_SAME_SITE_VAL="none"
+    # Shared parent cookie domain when possible (a.b.com + api.b.com → .b.com)
+    derive_cookie_domain() {
+        local host="$1"
+        local parts
+        IFS='.' read -r -a parts <<< "$host"
+        local n=${#parts[@]}
+        if [ "$n" -ge 2 ]; then
+            echo ".${parts[$((n-2))]}.${parts[$((n-1))]}"
+        else
+            echo ""
+        fi
+    }
+    COOKIE_DOMAIN="$(derive_cookie_domain "$FRONTEND_DOMAIN")"
+fi
+
+echo -e "${GREEN}✓ API URL=${BACKEND_URL}${NC}$([ "$SAME_ORIGIN_API" = "1" ] && echo " (same-origin)" || echo " (separate)")"
 
 echo ""
 DEFAULT_USER="${EXISTING_FM_USERNAME:-reachable}"
@@ -144,7 +196,6 @@ else
     FM_PASSWORD="${FM_PASSWORD:-Reachable@2025#}"
 fi
 
-# Keep session secret stable across redeploys
 if [ -n "$EXISTING_SESSION_SECRET" ]; then
     SESSION_SECRET="$EXISTING_SESSION_SECRET"
 else
@@ -153,11 +204,13 @@ fi
 
 NGINX_FRONTEND_SITE="/etc/nginx/sites-available/${FRONTEND_DOMAIN}"
 NGINX_FRONTEND_ENABLED="/etc/nginx/sites-enabled/${FRONTEND_DOMAIN}"
+NGINX_BACKEND_SITE="/etc/nginx/sites-available/${BACKEND_DOMAIN}"
+NGINX_BACKEND_ENABLED="/etc/nginx/sites-enabled/${BACKEND_DOMAIN}"
 
 echo ""
 echo -e "${GREEN}Will deploy:${NC}"
 echo -e "  Site:  ${CYAN}${FRONTEND_URL}${NC}$([ "$UPDATE_FRONTEND_URL" = "1" ] && echo " → update .env" || echo " → keep .env")"
-echo -e "  API:   ${CYAN}${BACKEND_URL}${NC}  (nginx /api → localhost:3000)"
+echo -e "  API:   ${CYAN}${BACKEND_URL}${NC}"
 echo ""
 read -r -p "Continue? [Y/n]: " CONFIRM
 CONFIRM="${CONFIRM:-Y}"
@@ -170,7 +223,7 @@ render_nginx() {
     local src="$1"
     local dest="$2"
     sed -e "s/__FRONTEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
-        -e "s/__BACKEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
+        -e "s/__BACKEND_DOMAIN__/${BACKEND_DOMAIN}/g" \
         "$src" > "$dest"
 }
 
@@ -221,19 +274,22 @@ echo -e "${GREEN}✓ Frontend built${NC}"
 # ---------- Runtime config ----------
 echo -e "${YELLOW}Step 5: Writing .env and config.js...${NC}"
 
-# Ensure .env exists; only change FRONTEND_URL when the user provided a new value
 if [ ! -f "$ENV_FILE" ]; then
     cat > "$ENV_FILE" << EOF
 PORT=3000
 NODE_ENV=production
 FRONTEND_URL=${FRONTEND_URL}
+BACKEND_URL=${BACKEND_URL}
 FRONTEND_HOSTS=${FRONTEND_DOMAIN},www.${FRONTEND_DOMAIN}
-COOKIE_SAME_SITE=lax
+COOKIE_SAME_SITE=${COOKIE_SAME_SITE_VAL}
 STORAGE_DIR=${STORAGE_DIR}
 FM_USERNAME=${FM_USERNAME}
 FM_PASSWORD=${FM_PASSWORD}
 SESSION_SECRET=${SESSION_SECRET}
 EOF
+    if [ -n "$COOKIE_DOMAIN" ]; then
+        echo "COOKIE_DOMAIN=${COOKIE_DOMAIN}" >> "$ENV_FILE"
+    fi
 else
     set_env_var "PORT" "3000"
     set_env_var "NODE_ENV" "production"
@@ -241,7 +297,8 @@ else
     set_env_var "FM_USERNAME" "${FM_USERNAME}"
     set_env_var "FM_PASSWORD" "${FM_PASSWORD}"
     set_env_var "SESSION_SECRET" "${SESSION_SECRET}"
-    set_env_var "COOKIE_SAME_SITE" "lax"
+    set_env_var "COOKIE_SAME_SITE" "${COOKIE_SAME_SITE_VAL}"
+    set_env_var "BACKEND_URL" "${BACKEND_URL}"
 
     if [ "$UPDATE_FRONTEND_URL" = "1" ]; then
         set_env_var "FRONTEND_URL" "${FRONTEND_URL}"
@@ -249,25 +306,28 @@ else
         echo -e "${GREEN}✓ Updated FRONTEND_URL in .env${NC}"
     else
         echo -e "${GREEN}✓ Left FRONTEND_URL unchanged in .env${NC}"
-        # Refresh FRONTEND_HOSTS only if missing
         if [ -z "$(read_env_var FRONTEND_HOSTS)" ]; then
             set_env_var "FRONTEND_HOSTS" "${FRONTEND_DOMAIN},www.${FRONTEND_DOMAIN}"
         fi
     fi
+
+    if [ -n "$COOKIE_DOMAIN" ]; then
+        set_env_var "COOKIE_DOMAIN" "${COOKIE_DOMAIN}"
+    fi
 fi
 
-# Same-origin API (empty) — nginx proxies /api on the frontend domain
-cat > "$PROJECT_DIR/public/config.js" << 'EOF'
+# Browser API base: empty = same-origin /api; otherwise full backend origin
+cat > "$PROJECT_DIR/public/config.js" << EOF
 window.APP_CONFIG = {
-  API_URL: ''
+  API_URL: '${APP_API_URL}'
 };
 EOF
 cp -f "$PROJECT_DIR/public/config.js" "$PROJECT_DIR/dist/config.js"
 
-# File-based sessions (avoids MemoryStore production warning)
 mkdir -p "$PROJECT_DIR/.sessions"
 chmod 700 "$PROJECT_DIR/.sessions"
 echo -e "${GREEN}✓ Environment ready (${ENV_FILE})${NC}"
+echo -e "${GREEN}✓ config.js API_URL='${APP_API_URL}'${NC}"
 echo -e "${GREEN}✓ Session store: ${PROJECT_DIR}/.sessions${NC}"
 
 # ---------- Storage + symlinks ----------
@@ -298,18 +358,18 @@ chown -R "$NGINX_USER:$NGINX_USER" "$STORAGE_DIR" 2>/dev/null || true
 chmod 755 "$PUBLIC_WWW" "$PUBLIC_WWW/dist" "$PUBLIC_WWW/uploads"
 echo -e "${GREEN}✓ Storage + symlinks ready${NC}"
 
-# ---------- Nginx (single site — /api proxied on same domain) ----------
-echo -e "${YELLOW}Step 7: Configuring nginx (includes login 405 fix: location ^~ /api/)...${NC}"
+# ---------- Nginx ----------
+echo -e "${YELLOW}Step 7: Configuring nginx...${NC}"
 TMP_FE="$(mktemp)"
 render_nginx "$PROJECT_DIR/ftp.conf" "$TMP_FE"
 
-# Verify proxy block exists in rendered config
-if ! grep -q 'location \^~ /api/' "$TMP_FE"; then
-    echo -e "${RED}ERROR: rendered nginx config missing 'location ^~ /api/' — login POST would 405${NC}"
-    exit 1
+if [ "$SAME_ORIGIN_API" = "1" ]; then
+    if ! grep -q 'location \^~ /api/' "$TMP_FE"; then
+        echo -e "${RED}ERROR: rendered nginx config missing 'location ^~ /api/' — login POST would 405${NC}"
+        exit 1
+    fi
 fi
 
-# Preserve SSL cert lines if site already has certbot config
 preserve_ssl() {
     local existing="$1"
     local newfile="$2"
@@ -321,13 +381,25 @@ preserve_ssl() {
 
 preserve_ssl "$NGINX_FRONTEND_SITE" "$TMP_FE"
 rm -f "$TMP_FE"
-
 ln -sfn "$NGINX_FRONTEND_SITE" "$NGINX_FRONTEND_ENABLED"
 
-# Drop old separate API site if it was from a previous dual-domain deploy
-if [ -L "/etc/nginx/sites-enabled/api.${FRONTEND_DOMAIN}" ]; then
-    rm -f "/etc/nginx/sites-enabled/api.${FRONTEND_DOMAIN}"
-    echo -e "${YELLOW}Removed legacy api.${FRONTEND_DOMAIN} site (API is now ${FRONTEND_URL}/api)${NC}"
+if [ "$SAME_ORIGIN_API" = "1" ]; then
+    # Drop leftover separate API site from older dual-domain deploys
+    if [ -L "/etc/nginx/sites-enabled/api.${FRONTEND_DOMAIN}" ]; then
+        rm -f "/etc/nginx/sites-enabled/api.${FRONTEND_DOMAIN}"
+        echo -e "${YELLOW}Removed legacy api.${FRONTEND_DOMAIN} site${NC}"
+    fi
+    if [ "$BACKEND_DOMAIN" != "$FRONTEND_DOMAIN" ] && [ -L "$NGINX_BACKEND_ENABLED" ]; then
+        : # keep if somehow different name — handled below for separate mode
+    fi
+    echo -e "${GREEN}✓ Frontend site + same-origin ^~ /api/${NC}"
+else
+    TMP_BE="$(mktemp)"
+    render_nginx "$PROJECT_DIR/api-ftp.conf" "$TMP_BE"
+    preserve_ssl "$NGINX_BACKEND_SITE" "$TMP_BE"
+    rm -f "$TMP_BE"
+    ln -sfn "$NGINX_BACKEND_SITE" "$NGINX_BACKEND_ENABLED"
+    echo -e "${GREEN}✓ Separate API site: ${BACKEND_DOMAIN}${NC}"
 fi
 
 if ! nginx -t; then
@@ -335,7 +407,6 @@ if ! nginx -t; then
     exit 1
 fi
 systemctl reload nginx
-echo -e "${GREEN}✓ Nginx configured (site + ^~ /api/ proxy)${NC}"
 
 # ---------- SSL ----------
 echo -e "${YELLOW}Step 8: SSL certificate (certbot)...${NC}"
@@ -344,14 +415,19 @@ certbot --nginx -d "$FRONTEND_DOMAIN" --non-interactive --agree-tos \
     --register-unsafely-without-email --redirect 2>/dev/null || \
     echo -e "${YELLOW}⚠ Cert skipped (DNS/ports?). Later: certbot --nginx -d ${FRONTEND_DOMAIN}${NC}"
 
-# Certbot can rewrite the server block — force ^~ /api/ back if it was lost
-if [ -f "$NGINX_FRONTEND_SITE" ] && ! grep -q 'location \^~ /api/' "$NGINX_FRONTEND_SITE"; then
+if [ "$SAME_ORIGIN_API" != "1" ]; then
+    echo -e "${YELLOW}DNS for ${BACKEND_DOMAIN} must point here.${NC}"
+    certbot --nginx -d "$BACKEND_DOMAIN" --non-interactive --agree-tos \
+        --register-unsafely-without-email --redirect 2>/dev/null || \
+        echo -e "${YELLOW}⚠ API cert skipped. Later: certbot --nginx -d ${BACKEND_DOMAIN}${NC}"
+fi
+
+# Certbot can rewrite the server block — force ^~ /api/ back if lost (same-origin only)
+if [ "$SAME_ORIGIN_API" = "1" ] && [ -f "$NGINX_FRONTEND_SITE" ] && ! grep -q 'location \^~ /api/' "$NGINX_FRONTEND_SITE"; then
     echo -e "${YELLOW}Restoring location ^~ /api/ after certbot...${NC}"
     if grep -q 'location /api/' "$NGINX_FRONTEND_SITE"; then
         sed -i 's|location /api/|location ^~ /api/|g' "$NGINX_FRONTEND_SITE"
     else
-        # Insert before first "location = /download" or after server_name block via re-render + certbot note
-        echo -e "${YELLOW}Re-applying full nginx template + certbot...${NC}"
         TMP_FE2="$(mktemp)"
         render_nginx "$PROJECT_DIR/ftp.conf" "$TMP_FE2"
         cp "$TMP_FE2" "$NGINX_FRONTEND_SITE"
@@ -425,8 +501,13 @@ echo -e "Login:    ${CYAN}${FM_USERNAME}${NC} / (password you set)"
 echo ""
 echo -e "${GREEN}This deploy applied:${NC}"
 echo -e "  ✓ File session store (.sessions) — no MemoryStore warning"
-echo -e "  ✓ nginx ${CYAN}location ^~ /api/${NC} — fixes login 405"
-echo -e "  ✓ Same-origin API at ${CYAN}${BACKEND_URL}${NC}"
+if [ "$SAME_ORIGIN_API" = "1" ]; then
+    echo -e "  ✓ nginx ${CYAN}location ^~ /api/${NC} — fixes login 405"
+    echo -e "  ✓ Same-origin API at ${CYAN}${BACKEND_URL}${NC}"
+else
+    echo -e "  ✓ Separate API host ${CYAN}${BACKEND_DOMAIN}${NC}"
+    echo -e "  ✓ config.js API_URL=${CYAN}${APP_API_URL}${NC}"
+fi
 echo ""
 echo -e "Useful:"
 echo -e "  pm2 status"

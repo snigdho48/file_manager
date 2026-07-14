@@ -48,7 +48,7 @@ const Header = ({ searchQuery, onSearch, onLiveSearch, onClearSearch, onUpload }
           </div>
           <div className="min-w-0">
             <h1 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white truncate">
-              CrowdWork360
+              Reachableads
             </h1>
             <p className="text-xs text-gray-500 dark:text-gray-400 hidden sm:block">
               File Manager

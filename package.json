@@ -1,7 +1,7 @@
 {
-  "name": "crowdwork360-file-manager",
+  "name": "reachable-file-manager",
   "version": "2.0.0",
-  "description": "CrowdWork360 online file manager with React and Tailwind CSS",
+  "description": "High-performance online file manager with React and Tailwind CSS",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
