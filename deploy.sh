@@ -79,26 +79,19 @@ domain_from_url() {
 }
 
 # ---------- Interactive deploy inputs ----------
-# Same vars as non-interactive:
+# Only one URL — API is same origin at /api
 #   DEPLOY_FRONTEND_URL=https://files.example.com
-#   DEPLOY_BACKEND_DOMAIN=api.files.example.com
 EXISTING_FRONTEND_URL="$(read_env_var FRONTEND_URL)"
 EXISTING_SESSION_SECRET="$(read_env_var SESSION_SECRET)"
 EXISTING_FM_USERNAME="$(read_env_var FM_USERNAME)"
 EXISTING_FM_PASSWORD="$(read_env_var FM_PASSWORD)"
 
-EXISTING_BACKEND_HINT=""
-if [ -f "$PROJECT_DIR/.deploy-info" ]; then
-    EXISTING_BACKEND_HINT="$(grep -E '^BACKEND_DOMAIN=' "$PROJECT_DIR/.deploy-info" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')"
-fi
-
-echo -e "${YELLOW}Enter deploy settings (or press Enter to keep / use defaults)${NC}"
-echo -e "  Example:"
-echo -e "    ${CYAN}DEPLOY_FRONTEND_URL=https://files.example.com${NC}"
-echo -e "    ${CYAN}DEPLOY_BACKEND_DOMAIN=api.files.example.com${NC}"
+echo -e "${YELLOW}Site URL (API will be the same host under /api)${NC}"
+echo -e "  Example: ${CYAN}DEPLOY_FRONTEND_URL=https://files.example.com${NC}"
+echo -e "  Then API is: ${CYAN}https://files.example.com/api${NC}"
 echo ""
 
-# --- DEPLOY_FRONTEND_URL ---
+# --- DEPLOY_FRONTEND_URL (only prompt) ---
 if [ -n "${DEPLOY_FRONTEND_URL:-}" ]; then
     FRONTEND_URL_INPUT="$DEPLOY_FRONTEND_URL"
     echo -e "${GREEN}Using env DEPLOY_FRONTEND_URL=${DEPLOY_FRONTEND_URL}${NC}"
@@ -133,42 +126,9 @@ if [ -z "$FRONTEND_DOMAIN" ]; then
     exit 1
 fi
 
-DEFAULT_API="${EXISTING_BACKEND_HINT:-api.${FRONTEND_DOMAIN}}"
-
-# --- DEPLOY_BACKEND_DOMAIN ---
-echo ""
-if [ -n "${DEPLOY_BACKEND_DOMAIN:-}" ]; then
-    BACKEND_INPUT="$DEPLOY_BACKEND_DOMAIN"
-    echo -e "${GREEN}Using env DEPLOY_BACKEND_DOMAIN=${DEPLOY_BACKEND_DOMAIN}${NC}"
-else
-    echo -e "  Default API host: ${CYAN}${DEFAULT_API}${NC}"
-    echo -e "  ${YELLOW}Leave empty to use the default.${NC}"
-    read -r -p "$(echo -e ${CYAN}DEPLOY_BACKEND_DOMAIN${NC}=)" BACKEND_INPUT
-fi
-
-BACKEND_INPUT="$(echo "${BACKEND_INPUT:-}" | sed -E 's/^DEPLOY_BACKEND_DOMAIN=//; s/[[:space:]]+//g')"
-BACKEND_INPUT="${BACKEND_INPUT:-$DEFAULT_API}"
-BACKEND_DOMAIN="$(domain_from_url "$(normalize_frontend_url "$BACKEND_INPUT")")"
-
-if [ -z "$BACKEND_DOMAIN" ]; then
-    echo -e "${RED}Invalid DEPLOY_BACKEND_DOMAIN${NC}"
-    exit 1
-fi
-echo -e "${GREEN}✓ DEPLOY_BACKEND_DOMAIN=${BACKEND_DOMAIN}${NC}"
-
-# Cookie domain: parent of frontend (optional; same-origin /api is default)
-derive_cookie_domain() {
-    local host="$1"
-    local parts
-    IFS='.' read -r -a parts <<< "$host"
-    local n=${#parts[@]}
-    if [ "$n" -ge 2 ]; then
-        echo ".${parts[$((n-2))]}.${parts[$((n-1))]}"
-    else
-        echo ""
-    fi
-}
-COOKIE_DOMAIN="$(derive_cookie_domain "$FRONTEND_DOMAIN")"
+# Same-origin API — no separate backend domain
+BACKEND_URL="${FRONTEND_URL}/api"
+COOKIE_DOMAIN=""
 
 echo ""
 DEFAULT_USER="${EXISTING_FM_USERNAME:-reachable}"
@@ -191,18 +151,13 @@ else
     SESSION_SECRET="${SESSION_SECRET:-$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)}"
 fi
 
-BACKEND_URL="https://${BACKEND_DOMAIN}"
-
 NGINX_FRONTEND_SITE="/etc/nginx/sites-available/${FRONTEND_DOMAIN}"
-NGINX_BACKEND_SITE="/etc/nginx/sites-available/${BACKEND_DOMAIN}"
 NGINX_FRONTEND_ENABLED="/etc/nginx/sites-enabled/${FRONTEND_DOMAIN}"
-NGINX_BACKEND_ENABLED="/etc/nginx/sites-enabled/${BACKEND_DOMAIN}"
 
 echo ""
 echo -e "${GREEN}Will deploy:${NC}"
-echo -e "  DEPLOY_FRONTEND_URL=${CYAN}${FRONTEND_URL}${NC}$([ "$UPDATE_FRONTEND_URL" = "1" ] && echo " → update .env" || echo " → keep .env")"
-echo -e "  DEPLOY_BACKEND_DOMAIN=${CYAN}${BACKEND_DOMAIN}${NC}"
-echo -e "  API URL: ${CYAN}${BACKEND_URL}${NC} (nginx → localhost:3000)"
+echo -e "  Site:  ${CYAN}${FRONTEND_URL}${NC}$([ "$UPDATE_FRONTEND_URL" = "1" ] && echo " → update .env" || echo " → keep .env")"
+echo -e "  API:   ${CYAN}${BACKEND_URL}${NC}  (nginx /api → localhost:3000)"
 echo ""
 read -r -p "Continue? [Y/n]: " CONFIRM
 CONFIRM="${CONFIRM:-Y}"
@@ -215,7 +170,7 @@ render_nginx() {
     local src="$1"
     local dest="$2"
     sed -e "s/__FRONTEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
-        -e "s/__BACKEND_DOMAIN__/${BACKEND_DOMAIN}/g" \
+        -e "s/__BACKEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
         "$src" > "$dest"
 }
 
@@ -336,12 +291,10 @@ chown -R "$NGINX_USER:$NGINX_USER" "$STORAGE_DIR" 2>/dev/null || true
 chmod 755 "$PUBLIC_WWW" "$PUBLIC_WWW/dist" "$PUBLIC_WWW/uploads"
 echo -e "${GREEN}✓ Storage + symlinks ready${NC}"
 
-# ---------- Nginx ----------
+# ---------- Nginx (single site — /api proxied on same domain) ----------
 echo -e "${YELLOW}Step 7: Configuring nginx...${NC}"
 TMP_FE="$(mktemp)"
-TMP_BE="$(mktemp)"
 render_nginx "$PROJECT_DIR/ftp.conf" "$TMP_FE"
-render_nginx "$PROJECT_DIR/api-ftp.conf" "$TMP_BE"
 
 # Preserve SSL cert lines if site already has certbot config
 preserve_ssl() {
@@ -354,28 +307,23 @@ preserve_ssl() {
 }
 
 preserve_ssl "$NGINX_FRONTEND_SITE" "$TMP_FE"
-preserve_ssl "$NGINX_BACKEND_SITE" "$TMP_BE"
-rm -f "$TMP_FE" "$TMP_BE"
+rm -f "$TMP_FE"
 
 ln -sfn "$NGINX_FRONTEND_SITE" "$NGINX_FRONTEND_ENABLED"
-ln -sfn "$NGINX_BACKEND_SITE" "$NGINX_BACKEND_ENABLED"
 
 if ! nginx -t; then
     echo -e "${RED}Nginx config test failed${NC}"
     exit 1
 fi
 systemctl reload nginx
-echo -e "${GREEN}✓ Nginx configured${NC}"
+echo -e "${GREEN}✓ Nginx configured (site + /api proxy)${NC}"
 
 # ---------- SSL ----------
-echo -e "${YELLOW}Step 8: SSL certificates (certbot)...${NC}"
-echo -e "${YELLOW}DNS for ${FRONTEND_DOMAIN} and ${BACKEND_DOMAIN} must point here.${NC}"
+echo -e "${YELLOW}Step 8: SSL certificate (certbot)...${NC}"
+echo -e "${YELLOW}DNS for ${FRONTEND_DOMAIN} must point here.${NC}"
 certbot --nginx -d "$FRONTEND_DOMAIN" --non-interactive --agree-tos \
     --register-unsafely-without-email --redirect 2>/dev/null || \
-    echo -e "${YELLOW}⚠ Frontend cert skipped (DNS/ports?). Later: certbot --nginx -d ${FRONTEND_DOMAIN}${NC}"
-certbot --nginx -d "$BACKEND_DOMAIN" --non-interactive --agree-tos \
-    --register-unsafely-without-email --redirect 2>/dev/null || \
-    echo -e "${YELLOW}⚠ API cert skipped (DNS/ports?). Later: certbot --nginx -d ${BACKEND_DOMAIN}${NC}"
+    echo -e "${YELLOW}⚠ Cert skipped (DNS/ports?). Later: certbot --nginx -d ${FRONTEND_DOMAIN}${NC}"
 nginx -t 2>/dev/null && systemctl reload nginx || true
 certbot renew --quiet 2>/dev/null || true
 echo -e "${GREEN}✓ SSL step done${NC}"
@@ -412,7 +360,6 @@ fi
 # ---------- Save deploy info ----------
 cat > "$PROJECT_DIR/.deploy-info" << EOF
 FRONTEND_DOMAIN=${FRONTEND_DOMAIN}
-BACKEND_DOMAIN=${BACKEND_DOMAIN}
 FRONTEND_URL=${FRONTEND_URL}
 BACKEND_URL=${BACKEND_URL}
 STORAGE_DIR=${STORAGE_DIR}

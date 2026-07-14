@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Update nginx site configs from templates (ftp.conf / api-ftp.conf).
-# Reads domains from .deploy-info or prompts.
+# Update nginx site config from ftp.conf (single domain; /api on same host).
+# Reads domain from .deploy-info or prompts.
 
 set -e
 
@@ -23,48 +23,39 @@ if [ -f "$SCRIPT_DIR/.deploy-info" ]; then
     source "$SCRIPT_DIR/.deploy-info"
 fi
 
-if [ -z "${FRONTEND_DOMAIN:-}" ]; then
-    read -r -p "$(echo -e ${CYAN}Frontend domain${NC}: )" FRONTEND_DOMAIN
-fi
-if [ -z "${BACKEND_DOMAIN:-}" ]; then
-    read -r -p "$(echo -e ${CYAN}API domain${NC} [api.${FRONTEND_DOMAIN}]: )" BACKEND_DOMAIN
-    BACKEND_DOMAIN="${BACKEND_DOMAIN:-api.${FRONTEND_DOMAIN}}"
+if [ -z "${FRONTEND_DOMAIN:-}" ] && [ -n "${FRONTEND_URL:-}" ]; then
+    FRONTEND_DOMAIN="$(echo "$FRONTEND_URL" | sed -E 's#^https?://##; s#/.*##')"
 fi
 
-FRONTEND_DOMAIN="$(echo "$FRONTEND_DOMAIN" | sed -E 's#^https?://##; s#/$##')"
-BACKEND_DOMAIN="$(echo "$BACKEND_DOMAIN" | sed -E 's#^https?://##; s#/$##')"
+if [ -z "${FRONTEND_DOMAIN:-}" ]; then
+    read -r -p "$(echo -e ${CYAN}DEPLOY_FRONTEND_URL${NC}=)" RAW
+    RAW="$(echo "$RAW" | sed -E 's/^DEPLOY_FRONTEND_URL=//; s/[[:space:]]+//g')"
+    FRONTEND_DOMAIN="$(echo "$RAW" | sed -E 's#^https?://##; s#/.*##; s#/$##')"
+fi
+
+FRONTEND_DOMAIN="$(echo "$FRONTEND_DOMAIN" | sed -E 's#^https?://##; s#/$##' | tr '[:upper:]' '[:lower:]')"
 
 FRONTEND_CONFIG="/etc/nginx/sites-available/${FRONTEND_DOMAIN}"
-BACKEND_CONFIG="/etc/nginx/sites-available/${BACKEND_DOMAIN}"
 FRONTEND_ENABLED="/etc/nginx/sites-enabled/${FRONTEND_DOMAIN}"
-BACKEND_ENABLED="/etc/nginx/sites-enabled/${BACKEND_DOMAIN}"
 
-echo -e "${YELLOW}Rendering nginx configs for ${FRONTEND_DOMAIN} / ${BACKEND_DOMAIN}...${NC}"
+echo -e "${YELLOW}Rendering nginx config for ${FRONTEND_DOMAIN} (/api on same host)...${NC}"
 
 TMP_FE="$(mktemp)"
-TMP_BE="$(mktemp)"
 sed -e "s/__FRONTEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
-    -e "s/__BACKEND_DOMAIN__/${BACKEND_DOMAIN}/g" \
+    -e "s/__BACKEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
     "$SCRIPT_DIR/ftp.conf" > "$TMP_FE"
-sed -e "s/__FRONTEND_DOMAIN__/${FRONTEND_DOMAIN}/g" \
-    -e "s/__BACKEND_DOMAIN__/${BACKEND_DOMAIN}/g" \
-    "$SCRIPT_DIR/api-ftp.conf" > "$TMP_BE"
 
 [ -f "$FRONTEND_CONFIG" ] && cp "$FRONTEND_CONFIG" "${FRONTEND_CONFIG}.backup.$(date +%s)"
-[ -f "$BACKEND_CONFIG" ] && cp "$BACKEND_CONFIG" "${BACKEND_CONFIG}.backup.$(date +%s)"
-
 cp "$TMP_FE" "$FRONTEND_CONFIG"
-cp "$TMP_BE" "$BACKEND_CONFIG"
-rm -f "$TMP_FE" "$TMP_BE"
+rm -f "$TMP_FE"
 
 ln -sfn "$FRONTEND_CONFIG" "$FRONTEND_ENABLED"
-ln -sfn "$BACKEND_CONFIG" "$BACKEND_ENABLED"
 
 if nginx -t; then
     systemctl reload nginx
     echo -e "${GREEN}✓ Nginx updated and reloaded${NC}"
-    echo -e "${YELLOW}Re-run certbot if SSL lines were reset: certbot --nginx -d ${FRONTEND_DOMAIN} -d ${BACKEND_DOMAIN}${NC}"
+    echo -e "${YELLOW}Re-run certbot if SSL was reset: certbot --nginx -d ${FRONTEND_DOMAIN}${NC}"
 else
-    echo -e "${RED}Nginx test failed — backups kept beside the site files${NC}"
+    echo -e "${RED}Nginx test failed — backup kept beside the site file${NC}"
     exit 1
 fi
