@@ -71,7 +71,13 @@ cd /path/to/mainFile
 sudo bash deploy.sh
 ```
 
-Leave `DEPLOY_FRONTEND_URL` empty to keep `.env`; rebuild + restart still run.
+Leave `DEPLOY_FRONTEND_URL` empty to keep `.env`; rebuild, nginx (`^~ /api`), file sessions, and PM2 restart still run.
+
+On each deploy the script also:
+
+- Installs `session-file-store` and creates `.sessions/`
+- Writes nginx with `location ^~ /api/` (fixes login **405**)
+- Restarts `filemanager-api` via PM2
 
 ## Useful commands
 
@@ -87,6 +93,7 @@ sudo certbot renew
 
 | Symptom | Fix |
 |---------|-----|
-| Login fails / 401 | `config.js` has `API_URL: ''` and nginx has `location /api/` |
+| Login fails / 401 | `config.js` has `API_URL: ''` and nginx has `location ^~ /api/` |
+| Login **405 Not Allowed** | Nginx regex stole `/api` — use `location ^~ /api/` then `sudo bash update-nginx.sh` + `nginx -t && systemctl reload nginx` |
 | 502 on /api | `pm2 status` / `pm2 start server.js --name filemanager-api` |
 | SSL failed | Point DNS first, then `certbot --nginx -d your.domain` |

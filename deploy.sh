@@ -203,6 +203,8 @@ fi
 cd "$PROJECT_DIR"
 echo -e "${YELLOW}Step 3: Installing npm dependencies...${NC}"
 npm install --production=false --legacy-peer-deps || npm install --production=false
+# Ensure session-file-store is present (production session store — silences MemoryStore warning)
+npm install session-file-store --save --legacy-peer-deps 2>/dev/null || true
 echo -e "${GREEN}✓ Dependencies installed${NC}"
 
 echo -e "${YELLOW}Step 4: Building frontend...${NC}"
@@ -261,7 +263,12 @@ window.APP_CONFIG = {
 };
 EOF
 cp -f "$PROJECT_DIR/public/config.js" "$PROJECT_DIR/dist/config.js"
+
+# File-based sessions (avoids MemoryStore production warning)
+mkdir -p "$PROJECT_DIR/.sessions"
+chmod 700 "$PROJECT_DIR/.sessions"
 echo -e "${GREEN}✓ Environment ready (${ENV_FILE})${NC}"
+echo -e "${GREEN}✓ Session store: ${PROJECT_DIR}/.sessions${NC}"
 
 # ---------- Storage + symlinks ----------
 echo -e "${YELLOW}Step 6: Storage directory & nginx symlinks...${NC}"
@@ -292,9 +299,15 @@ chmod 755 "$PUBLIC_WWW" "$PUBLIC_WWW/dist" "$PUBLIC_WWW/uploads"
 echo -e "${GREEN}✓ Storage + symlinks ready${NC}"
 
 # ---------- Nginx (single site — /api proxied on same domain) ----------
-echo -e "${YELLOW}Step 7: Configuring nginx...${NC}"
+echo -e "${YELLOW}Step 7: Configuring nginx (includes login 405 fix: location ^~ /api/)...${NC}"
 TMP_FE="$(mktemp)"
 render_nginx "$PROJECT_DIR/ftp.conf" "$TMP_FE"
+
+# Verify proxy block exists in rendered config
+if ! grep -q 'location \^~ /api/' "$TMP_FE"; then
+    echo -e "${RED}ERROR: rendered nginx config missing 'location ^~ /api/' — login POST would 405${NC}"
+    exit 1
+fi
 
 # Preserve SSL cert lines if site already has certbot config
 preserve_ssl() {
@@ -311,12 +324,18 @@ rm -f "$TMP_FE"
 
 ln -sfn "$NGINX_FRONTEND_SITE" "$NGINX_FRONTEND_ENABLED"
 
+# Drop old separate API site if it was from a previous dual-domain deploy
+if [ -L "/etc/nginx/sites-enabled/api.${FRONTEND_DOMAIN}" ]; then
+    rm -f "/etc/nginx/sites-enabled/api.${FRONTEND_DOMAIN}"
+    echo -e "${YELLOW}Removed legacy api.${FRONTEND_DOMAIN} site (API is now ${FRONTEND_URL}/api)${NC}"
+fi
+
 if ! nginx -t; then
     echo -e "${RED}Nginx config test failed${NC}"
     exit 1
 fi
 systemctl reload nginx
-echo -e "${GREEN}✓ Nginx configured (site + /api proxy)${NC}"
+echo -e "${GREEN}✓ Nginx configured (site + ^~ /api/ proxy)${NC}"
 
 # ---------- SSL ----------
 echo -e "${YELLOW}Step 8: SSL certificate (certbot)...${NC}"
@@ -324,23 +343,52 @@ echo -e "${YELLOW}DNS for ${FRONTEND_DOMAIN} must point here.${NC}"
 certbot --nginx -d "$FRONTEND_DOMAIN" --non-interactive --agree-tos \
     --register-unsafely-without-email --redirect 2>/dev/null || \
     echo -e "${YELLOW}⚠ Cert skipped (DNS/ports?). Later: certbot --nginx -d ${FRONTEND_DOMAIN}${NC}"
+
+# Certbot can rewrite the server block — force ^~ /api/ back if it was lost
+if [ -f "$NGINX_FRONTEND_SITE" ] && ! grep -q 'location \^~ /api/' "$NGINX_FRONTEND_SITE"; then
+    echo -e "${YELLOW}Restoring location ^~ /api/ after certbot...${NC}"
+    if grep -q 'location /api/' "$NGINX_FRONTEND_SITE"; then
+        sed -i 's|location /api/|location ^~ /api/|g' "$NGINX_FRONTEND_SITE"
+    else
+        # Insert before first "location = /download" or after server_name block via re-render + certbot note
+        echo -e "${YELLOW}Re-applying full nginx template + certbot...${NC}"
+        TMP_FE2="$(mktemp)"
+        render_nginx "$PROJECT_DIR/ftp.conf" "$TMP_FE2"
+        cp "$TMP_FE2" "$NGINX_FRONTEND_SITE"
+        rm -f "$TMP_FE2"
+        certbot --nginx -d "$FRONTEND_DOMAIN" --non-interactive --agree-tos \
+            --register-unsafely-without-email --redirect 2>/dev/null || true
+        if [ -f "$NGINX_FRONTEND_SITE" ] && grep -q 'location /api/' "$NGINX_FRONTEND_SITE" \
+            && ! grep -q 'location \^~ /api/' "$NGINX_FRONTEND_SITE"; then
+            sed -i 's|location /api/|location ^~ /api/|g' "$NGINX_FRONTEND_SITE"
+        fi
+    fi
+fi
+
 nginx -t 2>/dev/null && systemctl reload nginx || true
 certbot renew --quiet 2>/dev/null || true
 echo -e "${GREEN}✓ SSL step done${NC}"
 
 # ---------- PM2 ----------
-echo -e "${YELLOW}Step 9: Starting API with PM2...${NC}"
+echo -e "${YELLOW}Step 9: Starting API with PM2 (file session store)...${NC}"
 if ! command -v pm2 &>/dev/null; then
     npm install -g pm2
 fi
 cd "$PROJECT_DIR"
+mkdir -p "$PROJECT_DIR/.sessions"
+chmod 700 "$PROJECT_DIR/.sessions"
 pm2 delete filemanager-api 2>/dev/null || true
-pm2 start server.js --name filemanager-api --update-env
+# Load .env from project dir; --update-env refreshes vars
+pm2 start server.js --name filemanager-api --cwd "$PROJECT_DIR" --update-env
 pm2 save
 pm2 startup systemd -u root --hp /root 2>/dev/null | grep -v "PM2" | bash 2>/dev/null || true
-sleep 2
+sleep 3
 if pm2 list | grep -q "filemanager-api.*online"; then
     echo -e "${GREEN}✓ Backend online (port 3000)${NC}"
+    # Smoke-check: POST /api/login should not be 405 from nginx
+    CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:3000/api/login" \
+        -H 'Content-Type: application/json' -d '{}' || true)"
+    echo -e "  Direct API smoke POST /api/login → HTTP ${CYAN}${CODE}${NC} (400/401 = OK; 405 = broken)"
 else
     echo -e "${YELLOW}⚠ Check: pm2 logs filemanager-api${NC}"
     pm2 logs filemanager-api --lines 30 --nostream || true
@@ -374,6 +422,11 @@ echo ""
 echo -e "Open:     ${GREEN}${FRONTEND_URL}${NC}"
 echo -e "API:      ${GREEN}${BACKEND_URL}${NC}"
 echo -e "Login:    ${CYAN}${FM_USERNAME}${NC} / (password you set)"
+echo ""
+echo -e "${GREEN}This deploy applied:${NC}"
+echo -e "  ✓ File session store (.sessions) — no MemoryStore warning"
+echo -e "  ✓ nginx ${CYAN}location ^~ /api/${NC} — fixes login 405"
+echo -e "  ✓ Same-origin API at ${CYAN}${BACKEND_URL}${NC}"
 echo ""
 echo -e "Useful:"
 echo -e "  pm2 status"

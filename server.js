@@ -22,6 +22,7 @@ const mime = require('mime-types');
 const compression = require('compression');
 const helmet = require('helmet');
 const session = require('express-session');
+const FileStore = require('session-file-store')(session);
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 
@@ -114,7 +115,16 @@ if (COOKIE_DOMAIN) {
     sessionCookie.domain = COOKIE_DOMAIN;
 }
 
+const SESSION_DIR = path.join(__dirname, '.sessions');
+fs.ensureDirSync(SESSION_DIR);
+
 app.use(session({
+    store: new FileStore({
+        path: SESSION_DIR,
+        ttl: 24 * 60 * 60, // seconds
+        retries: 1,
+        logFn: () => {} // quiet
+    }),
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
