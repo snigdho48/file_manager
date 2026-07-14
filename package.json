@@ -1,7 +1,7 @@
 {
-  "name": "reachable-file-manager",
+  "name": "crowdwork360-file-manager",
   "version": "2.0.0",
-  "description": "High-performance online file manager with React and Tailwind CSS",
+  "description": "CrowdWork360 online file manager with React and Tailwind CSS",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -13,9 +13,11 @@
     "client:build": "vite build",
     "client:preview": "vite preview",
     "build": "npm run client:build",
-    "build:prod": "npm run client:build"
+    "build:prod": "npm run client:build",
+    "deploy": "bash deploy.sh"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "archiver": "^6.0.1",
     "axios": "^1.6.0",
     "bcryptjs": "^2.4.3",
@@ -27,7 +29,9 @@
     "express-session": "^1.18.2",
     "fs-extra": "^11.2.0",
     "helmet": "^7.1.0",
+    "html-to-docx": "^1.8.0",
     "lucide-react": "^0.294.0",
+    "mammoth": "^1.12.0",
     "mime-types": "^2.1.35",
     "multer": "^1.4.5-lts.1",
     "path": "^0.12.7",
@@ -35,7 +39,8 @@
     "react-dom": "^18.2.0",
     "react-hot-toast": "^2.4.1",
     "react-router-dom": "^6.8.1",
-    "unzipper": "^0.10.14"
+    "unzipper": "^0.10.14",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
@@ -46,6 +51,7 @@
     "concurrently": "^8.2.2",
     "nodemon": "^3.0.2",
     "postcss": "^8.4.32",
+    "sharp": "^0.35.3",
     "tailwindcss": "^3.4.0",
     "vite": "^7.3.0"
   },

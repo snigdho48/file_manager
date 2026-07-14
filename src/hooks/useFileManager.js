@@ -307,6 +307,24 @@ export const useFileManager = () => {
     }
   }, [])
 
+  const saveFile = useCallback(async ({ path: filePath, content, html, sheets, editType }) => {
+    try {
+      const response = await axios.put('/api/save', {
+        path: filePath,
+        content,
+        html,
+        sheets,
+        editType
+      })
+      return response.data
+    } catch (error) {
+      console.error('Save failed:', error)
+      const errorMessage = error.response?.data?.error || 'Save failed'
+      toast.error(errorMessage)
+      throw error
+    }
+  }, [])
+
   // Search functionality with debouncing
   const searchTimeoutRef = useRef(null)
   
@@ -529,6 +547,7 @@ export const useFileManager = () => {
     createFolder,
     renameFile,
     previewFile,
+    saveFile,
     searchFiles,
     handleLiveSearch,
     clearSearch,

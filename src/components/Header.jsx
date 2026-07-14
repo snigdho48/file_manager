@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { Upload, Search, X, User, LogOut, Sun, Moon, Monitor } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useTheme } from '../context/ThemeContext'
+import BrandLogo from './BrandLogo'
 import toast from 'react-hot-toast'
 
 const Header = ({ searchQuery, onSearch, onLiveSearch, onClearSearch, onUpload }) => {
@@ -42,15 +43,15 @@ const Header = ({ searchQuery, onSearch, onLiveSearch, onClearSearch, onUpload }
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
         {/* Left side - Logo and title */}
         <div className="flex items-center space-x-2 sm:space-x-3 min-w-0 flex-shrink-0">
-          <div className="flex items-center justify-center w-7 h-7 sm:w-8 sm:h-8 rounded-lg flex-shrink-0">
-            <img src="/icon.png" alt="Reachable File Manager" className="w-7 h-7 sm:w-8 sm:h-8 rounded-md" />
+          <div className="flex items-center justify-center w-7 h-7 sm:w-8 sm:h-8 rounded-lg flex-shrink-0 overflow-hidden">
+            <BrandLogo className="w-7 h-7 sm:w-8 sm:h-8" />
           </div>
           <div className="min-w-0">
             <h1 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white truncate">
-              Reachable File Manager
+              CrowdWork360
             </h1>
             <p className="text-xs text-gray-500 dark:text-gray-400 hidden sm:block">
-              Creative Edition
+              File Manager
             </p>
           </div>
         </div>

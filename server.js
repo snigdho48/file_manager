@@ -27,6 +27,7 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // Trust proxy - REQUIRED when behind nginx reverse proxy
 // This allows Express to correctly identify client IPs from X-Forwarded-For header
@@ -35,22 +36,38 @@ app.set('trust proxy', 1); // Trust first proxy (nginx)
 // Default credentials (change these in production!)
 const DEFAULT_USERNAME = process.env.FM_USERNAME || 'reachable';
 const DEFAULT_PASSWORD = process.env.FM_PASSWORD || 'Reachable@2025#';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'I_AM_SNIGDHO';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production';
+
+// Domain configuration (set by deploy.sh / .env)
+const FRONTEND_URL = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || ''; // e.g. .example.com — leave empty for host-only (same-origin proxy)
+const COOKIE_SAME_SITE = (process.env.COOKIE_SAME_SITE || (COOKIE_DOMAIN ? 'none' : 'lax')).toLowerCase();
+
+// Hostnames used when rewriting absolute URLs inside extracted HTML/CSS
+const FRONTEND_HOSTS = [
+    ...(process.env.FRONTEND_HOSTS || '').split(','),
+    FRONTEND_URL.replace(/^https?:\/\//, ''),
+].map((h) => h.trim().toLowerCase()).filter(Boolean);
+
+const allowedCorsOrigins = [
+    FRONTEND_URL,
+    ...(process.env.CORS_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean),
+].filter(Boolean);
 
 // Rate limiting (trust proxy must be set before rate limiter)
 const loginLimiter = rateLimit({
-    // windowMs: 24 * 60 * 60 * 1000, // 24 hours
-    // max: 5, // Limit each IP to 5 login requests per windowMs
-    message: 'Too many login attempts, please try again later.',
+    windowMs: 24 * 60 * 1000, // 15 minutes
+    max: 20, // Limit each IP to 20 login requests per window
+    message: { error: 'Too many login attempts, please try again later.' },
     skipSuccessfulRequests: true,
-    standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
-    legacyHeaders: false, // Disable `X-RateLimit-*` headers
+    standardHeaders: true,
+    legacyHeaders: false,
 });
-
-// API rate limiter removed - no restrictions on file operations
 
 // Security and optimization middleware
 app.use(helmet({
+    // API responses are not framed as pages; disabling avoids X-Frame-Options on file streams
+    frameguard: false,
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
@@ -67,35 +84,42 @@ app.use(helmet({
 
 app.use(compression());
 
-// CORS configuration for cross-domain deployment
-// Frontend: creative.reachableads.com
-// Backend: api.creative.reachableads.com
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://creative.reachableads.com';
+// CORS — supports same-origin nginx proxy and optional separate API domain
 app.use(cors({
-    origin: FRONTEND_URL, // Allow requests from frontend domain
-    credentials: true, // Allow cookies/credentials
+    origin: (origin, callback) => {
+        // Same-origin / non-browser clients send no Origin
+        if (!origin) return callback(null, true);
+        if (allowedCorsOrigins.length === 0 || allowedCorsOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     exposedHeaders: ['Set-Cookie'],
-    optionsSuccessStatus: 200 // Some legacy browsers
+    optionsSuccessStatus: 200
 }));
 
-// Session middleware
-// Note: Using MemoryStore (default) is fine for single-server deployments.
-// For multi-server or high-traffic scenarios, consider using Redis or a database-backed store.
+// Session cookie:
+// - Same-origin (frontend nginx proxies /api → Node): lax + no domain (most reliable)
+// - Cross-subdomain API: sameSite=none + COOKIE_DOMAIN + secure
+const sessionCookie = {
+    secure: IS_PRODUCTION || COOKIE_SAME_SITE === 'none',
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000,
+    sameSite: COOKIE_SAME_SITE === 'none' ? 'none' : 'lax',
+};
+if (COOKIE_DOMAIN) {
+    sessionCookie.domain = COOKIE_DOMAIN;
+}
+
 app.use(session({
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    name: 'filemanager.sid', // Custom session name
-    cookie: {
-        secure: process.env.NODE_ENV === 'production', // Use secure cookies in production
-        httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000, // 24 hours
-        sameSite: 'none', // Required for cross-domain cookies (frontend and backend on different domains)
-        domain: '.reachableads.com' // Share cookie across subdomains (creative.reachableads.com and api.creative.reachableads.com)
-    }
-    // store: MemoryStore (default) - acceptable for single-server deployments
+    name: 'filemanager.sid',
+    cookie: sessionCookie
 }));
 
 // Body parsing middleware - but not for multipart/form-data (handled by multer)
@@ -104,13 +128,10 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Authentication middleware
 const requireAuth = (req, res, next) => {
-
-    
     if (req.session && req.session.authenticated) {
         return next();
-    } else {
-        return res.status(401).json({ error: 'Authentication required' });
     }
+    return res.status(401).json({ error: 'Authentication required' });
 };
 
 // Serve service worker with correct headers (MUST come before static middleware)
@@ -162,28 +183,45 @@ app.use(express.static(path.join(__dirname, 'dist'), {
 app.use(express.static('public'));
 
 // File storage directory
-const STORAGE_DIR = path.join(__dirname, '..', 'creative');
+const STORAGE_DIR = path.resolve(process.env.STORAGE_DIR || path.join(__dirname, '..', 'creative'));
 fs.ensureDirSync(STORAGE_DIR);
+
+// Safe path join — prevent directory traversal
+const resolveSafePath = (...parts) => {
+    const resolved = path.resolve(...parts);
+    const root = path.resolve(STORAGE_DIR);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+        return null;
+    }
+    return resolved;
+};
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         // Use query parameter or default to root
         const uploadPath = req.query.path || '';
-        let fullPath = path.join(STORAGE_DIR, uploadPath);
+        let fullPath = resolveSafePath(STORAGE_DIR, uploadPath);
+        if (!fullPath) {
+            return cb(new Error('Access denied'));
+        }
         
-        // If file has webkitRelativePath, preserve folder structure
+        // If file has webkitRelativePath / nested originalname, preserve folder structure
         if (file.originalname && file.originalname.includes('/')) {
             const relativePath = path.dirname(file.originalname);
-            fullPath = path.join(STORAGE_DIR, uploadPath, relativePath);
+            fullPath = resolveSafePath(STORAGE_DIR, uploadPath, relativePath);
+            if (!fullPath) {
+                return cb(new Error('Access denied'));
+            }
         }
         
-        // Only create directory for actual files, not folders (0-byte files)
-        if (file.size > 0) {
+        // file.size is not available in destination callback — always ensure dir
+        try {
             fs.ensureDirSync(fullPath);
+            cb(null, fullPath);
+        } catch (err) {
+            cb(err);
         }
-        
-        cb(null, fullPath);
     },
     filename: (req, file, cb) => {
         // Preserve original filename with proper encoding
@@ -280,17 +318,24 @@ const formatFileSize = (bytes) => {
 
 // Routes
 
-// Home page - redirect to login if not authenticated
+// Home page — serve React app (dist) when built, else login/legacy public pages
 app.get('/', (req, res) => {
-    if (req.session && req.session.authenticated) {
-        res.sendFile(path.join(__dirname, 'public', 'index.html'));
-    } else {
-        res.sendFile(path.join(__dirname, 'public', 'login.html'));
+    const distIndex = path.join(__dirname, 'dist', 'index.html');
+    if (fs.existsSync(distIndex)) {
+        return res.sendFile(distIndex);
     }
+    if (req.session && req.session.authenticated) {
+        return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    }
+    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
 // Login page
 app.get('/login', (req, res) => {
+    const distIndex = path.join(__dirname, 'dist', 'index.html');
+    if (fs.existsSync(distIndex)) {
+        return res.sendFile(distIndex);
+    }
     res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
@@ -340,10 +385,9 @@ app.get('/api/auth-status', (req, res) => {
 app.get('/api/files', requireAuth, async (req, res) => {
     try {
         const requestedPath = req.query.path || '';
-        const fullPath = path.join(STORAGE_DIR, requestedPath);
+        const fullPath = resolveSafePath(STORAGE_DIR, requestedPath);
         
-        // Security check - prevent directory traversal
-        if (!fullPath.startsWith(STORAGE_DIR)) {
+        if (!fullPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -388,7 +432,12 @@ app.get('/api/files', requireAuth, async (req, res) => {
         res.json({
             path: requestedPath,
             items: items,
-            parentPath: requestedPath ? path.dirname(requestedPath).replace(/\\/g, '/') : null
+            parentPath: requestedPath
+                ? (() => {
+                    const parent = path.dirname(requestedPath).replace(/\\/g, '/');
+                    return (!parent || parent === '.') ? '' : parent;
+                  })()
+                : null
         });
     } catch (error) {
         console.error('List files error:', error);
@@ -459,10 +508,8 @@ app.get('/api/download', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'File path required' });
         }
 
-        const fullPath = path.join(STORAGE_DIR, filePath);
-        
-        // Security check
-        if (!fullPath.startsWith(STORAGE_DIR)) {
+        const fullPath = resolveSafePath(STORAGE_DIR, filePath);
+        if (!fullPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -533,10 +580,8 @@ app.delete('/api/delete', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Path required' });
         }
 
-        const fullPath = path.join(STORAGE_DIR, itemPath);
-        
-        // Security check
-        if (!fullPath.startsWith(STORAGE_DIR)) {
+        const fullPath = resolveSafePath(STORAGE_DIR, itemPath);
+        if (!fullPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -555,10 +600,8 @@ app.post('/api/mkdir', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Directory name required' });
         }
 
-        const fullPath = path.join(STORAGE_DIR, dirPath || '', name);
-        
-        // Security check
-        if (!fullPath.startsWith(STORAGE_DIR)) {
+        const fullPath = resolveSafePath(STORAGE_DIR, dirPath || '', name);
+        if (!fullPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -579,11 +622,12 @@ app.put('/api/rename', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Old path and new name required' });
         }
 
-        const oldFullPath = path.join(STORAGE_DIR, oldPath);
-        const newFullPath = path.join(path.dirname(oldFullPath), newName);
-        
-        // Security check
-        if (!oldFullPath.startsWith(STORAGE_DIR) || !newFullPath.startsWith(STORAGE_DIR)) {
+        const oldFullPath = resolveSafePath(STORAGE_DIR, oldPath);
+        if (!oldFullPath) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+        const newFullPath = resolveSafePath(path.dirname(oldFullPath), newName);
+        if (!newFullPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -605,7 +649,10 @@ app.get('/api/search', requireAuth, async (req, res) => {
         }
 
         const results = [];
-        const searchDir = path.join(STORAGE_DIR, searchPath);
+        const searchDir = resolveSafePath(STORAGE_DIR, searchPath);
+        if (!searchDir) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
         const maxResults = 100; // Limit results to prevent memory issues
         const queryLower = query.toLowerCase().trim();
 
@@ -665,7 +712,82 @@ app.get('/api/search', requireAuth, async (req, res) => {
     }
 });
 
-// Get file info for preview
+// --- Preview / editor helpers ---
+const TEXT_EXTENSIONS = new Set([
+    '.txt', '.md', '.markdown', '.log', '.csv', '.tsv', '.ini', '.cfg', '.conf', '.env',
+    '.json', '.jsonc', '.json5', '.xml', '.yml', '.yaml', '.toml', '.properties',
+    '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.vue', '.svelte',
+    '.html', '.htm', '.xhtml', '.css', '.scss', '.sass', '.less',
+    '.py', '.rb', '.php', '.java', '.kt', '.kts', '.go', '.rs', '.swift',
+    '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.cs', '.fs', '.scala',
+    '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd', '.sql', '.r', '.pl', '.lua',
+    '.gitignore', '.gitattributes', '.dockerignore', '.editorconfig',
+    '.svg', '.graphql', '.gql', '.proto', '.dockerfile', '.makefile', '.mk'
+]);
+
+const EXT_TO_LANGUAGE = {
+    '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+    '.ts': 'typescript', '.tsx': 'typescript',
+    '.json': 'json', '.jsonc': 'json', '.json5': 'json',
+    '.html': 'html', '.htm': 'html', '.xhtml': 'html',
+    '.css': 'css', '.scss': 'scss', '.less': 'less',
+    '.md': 'markdown', '.markdown': 'markdown',
+    '.xml': 'xml', '.svg': 'xml',
+    '.yml': 'yaml', '.yaml': 'yaml',
+    '.py': 'python', '.rb': 'ruby', '.php': 'php',
+    '.java': 'java', '.go': 'go', '.rs': 'rust',
+    '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.cc': 'cpp', '.hpp': 'cpp',
+    '.cs': 'csharp', '.sh': 'shell', '.bash': 'shell', '.zsh': 'shell',
+    '.ps1': 'powershell', '.sql': 'sql', '.r': 'r', '.lua': 'lua',
+    '.vue': 'html', '.graphql': 'graphql', '.gql': 'graphql',
+    '.txt': 'plaintext', '.log': 'plaintext', '.csv': 'plaintext', '.tsv': 'plaintext',
+    '.env': 'plaintext', '.ini': 'ini', '.toml': 'ini', '.conf': 'ini'
+};
+
+const looksLikeTextFile = (filePath, mimeType) => {
+    const ext = path.extname(filePath).toLowerCase();
+    const base = path.basename(filePath).toLowerCase();
+    if (TEXT_EXTENSIONS.has(ext)) return true;
+    if (TEXT_EXTENSIONS.has(`.${base}`) || TEXT_EXTENSIONS.has(base)) return true; // Dockerfile, Makefile
+    if (base === 'dockerfile' || base === 'makefile' || base === 'gemfile' || base === 'procfile') return true;
+    if (mimeType && (
+        mimeType.startsWith('text/') ||
+        mimeType === 'application/json' ||
+        mimeType === 'application/javascript' ||
+        mimeType === 'application/xml' ||
+        mimeType === 'application/x-sh' ||
+        mimeType.endsWith('+json') ||
+        mimeType.endsWith('+xml')
+    )) return true;
+    return false;
+};
+
+const getMonacoLanguage = (filePath) => {
+    const ext = path.extname(filePath).toLowerCase();
+    const base = path.basename(filePath).toLowerCase();
+    if (base === 'dockerfile') return 'dockerfile';
+    if (base === 'makefile') return 'makefile';
+    return EXT_TO_LANGUAGE[ext] || 'plaintext';
+};
+
+const classifyPreviewKind = (filePath, mimeType) => {
+    const ext = path.extname(filePath).toLowerCase();
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('video/')) return 'video';
+    if (mimeType.startsWith('audio/')) return 'audio';
+    if (mimeType === 'application/pdf' || ext === '.pdf') return 'pdf';
+    if (ext === '.docx') return 'docx';
+    if (ext === '.xlsx' || ext === '.xls' || ext === '.csv') {
+        if (ext === '.csv') return 'text';
+        return 'xlsx';
+    }
+    if (ext === '.doc') return 'unsupported-office';
+    if (['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'].includes(ext)) return 'archive';
+    if (looksLikeTextFile(filePath, mimeType)) return 'text';
+    return 'binary';
+};
+
+// Get file info for preview / editing
 app.get('/api/preview', requireAuth, async (req, res) => {
     try {
         const filePath = req.query.path;
@@ -673,10 +795,8 @@ app.get('/api/preview', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'File path required' });
         }
 
-        const fullPath = path.join(STORAGE_DIR, filePath);
-        
-        // Security check
-        if (!fullPath.startsWith(STORAGE_DIR)) {
+        const fullPath = resolveSafePath(STORAGE_DIR, filePath);
+        if (!fullPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -686,34 +806,185 @@ app.get('/api/preview', requireAuth, async (req, res) => {
         }
 
         const mimeType = mime.lookup(fullPath) || 'application/octet-stream';
-        
-        // Limit preview size to 512KB for better memory efficiency (reduced from 1MB)
-        const maxPreviewSize = 512 * 1024; // 512KB
-        
-        // For text files, read content with size limit
-        if (mimeType.startsWith('text/') && stats.size <= maxPreviewSize) {
-            // Use streaming read for better memory efficiency
+        const kind = classifyPreviewKind(fullPath, mimeType);
+        const name = path.basename(fullPath);
+        const base = {
+            name,
+            path: filePath,
+            size: formatFileSize(stats.size),
+            sizeBytes: stats.size,
+            mimeType,
+            kind,
+            editable: false
+        };
+
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+        // Text / code — Monaco editable
+        if (kind === 'text') {
+            const maxText = 5 * 1024 * 1024; // 5MB
+            if (stats.size > maxText) {
+                return res.json({
+                    ...base,
+                    editable: false,
+                    isText: false,
+                    tooLarge: true,
+                    message: 'File is too large to edit in the browser (max 5MB). Download to edit locally.'
+                });
+            }
             const content = await fs.readFile(fullPath, 'utf8');
-            res.setHeader('Cache-Control', 'private, max-age=3600'); // Cache previews for 1 hour
-            res.json({
-                name: path.basename(fullPath),
-                size: formatFileSize(stats.size),
-                mimeType,
+            return res.json({
+                ...base,
                 content,
-                isText: true
-            });
-        } else {
-            res.setHeader('Cache-Control', 'private, max-age=3600');
-            res.json({
-                name: path.basename(fullPath),
-                size: formatFileSize(stats.size),
-                mimeType,
-                isText: false
+                isText: true,
+                editable: true,
+                editType: 'text',
+                language: getMonacoLanguage(fullPath)
             });
         }
+
+        // Word DOCX — HTML editable
+        if (kind === 'docx') {
+            const maxOffice = 15 * 1024 * 1024;
+            if (stats.size > maxOffice) {
+                return res.json({ ...base, tooLarge: true, message: 'Word file too large to open (max 15MB).' });
+            }
+            try {
+                const mammoth = require('mammoth');
+                const result = await mammoth.convertToHtml({ path: fullPath });
+                return res.json({
+                    ...base,
+                    editable: true,
+                    editType: 'docx',
+                    html: result.value || '',
+                    warnings: (result.messages || []).map(m => m.message)
+                });
+            } catch (err) {
+                console.error('DOCX preview error:', err);
+                return res.json({ ...base, error: 'Failed to open Word document: ' + err.message });
+            }
+        }
+
+        // Excel — sheet grid editable
+        if (kind === 'xlsx') {
+            const maxOffice = 15 * 1024 * 1024;
+            if (stats.size > maxOffice) {
+                return res.json({ ...base, tooLarge: true, message: 'Spreadsheet too large to open (max 15MB).' });
+            }
+            try {
+                const XLSX = require('xlsx');
+                const workbook = XLSX.readFile(fullPath, { cellDates: true });
+                const sheets = workbook.SheetNames.map((sheetName) => {
+                    const sheet = workbook.Sheets[sheetName];
+                    const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+                    return { name: sheetName, data };
+                });
+                return res.json({
+                    ...base,
+                    editable: true,
+                    editType: 'xlsx',
+                    sheets
+                });
+            } catch (err) {
+                console.error('XLSX preview error:', err);
+                return res.json({ ...base, error: 'Failed to open spreadsheet: ' + err.message });
+            }
+        }
+
+        // PDF / media / archive / binary — optionally include hex for small binaries
+        if (kind === 'binary' && stats.size > 0 && stats.size <= 64 * 1024) {
+            const buf = await fs.readFile(fullPath);
+            const hexLines = [];
+            for (let i = 0; i < buf.length; i += 16) {
+                const slice = buf.subarray(i, Math.min(i + 16, buf.length));
+                const hex = [...slice].map(b => b.toString(16).padStart(2, '0')).join(' ');
+                const ascii = [...slice].map(b => (b >= 32 && b < 127) ? String.fromCharCode(b) : '.').join('');
+                hexLines.push(`${i.toString(16).padStart(8, '0')}  ${hex.padEnd(47)}  ${ascii}`);
+            }
+            return res.json({
+                ...base,
+                isText: false,
+                previewable: false,
+                hexPreview: hexLines.join('\n')
+            });
+        }
+
+        return res.json({
+            ...base,
+            isText: false,
+            previewable: ['image', 'video', 'audio', 'pdf'].includes(kind)
+        });
     } catch (error) {
         console.error('Preview error:', error);
         res.status(500).json({ error: 'Preview failed' });
+    }
+});
+
+// Save edited file (text, html→docx, spreadsheet)
+app.put('/api/save', requireAuth, async (req, res) => {
+    try {
+        const { path: filePath, content, html, sheets, editType } = req.body || {};
+        if (!filePath) {
+            return res.status(400).json({ error: 'File path required' });
+        }
+
+        const fullPath = resolveSafePath(STORAGE_DIR, filePath);
+        if (!fullPath) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+
+        if (!(await fs.pathExists(fullPath))) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        const type = editType || 'text';
+
+        if (type === 'text') {
+            if (typeof content !== 'string') {
+                return res.status(400).json({ error: 'Content string required' });
+            }
+            await fs.writeFile(fullPath, content, 'utf8');
+            await setFilePermissions(fullPath);
+            return res.json({ message: 'File saved successfully', size: formatFileSize(Buffer.byteLength(content, 'utf8')) });
+        }
+
+        if (type === 'docx') {
+            if (typeof html !== 'string') {
+                return res.status(400).json({ error: 'HTML content required' });
+            }
+            const HTMLtoDOCX = require('html-to-docx');
+            const buffer = await HTMLtoDOCX(html, null, {
+                table: { row: { cantSplit: true } },
+                footer: false,
+                pageNumber: false
+            });
+            await fs.writeFile(fullPath, buffer);
+            await setFilePermissions(fullPath);
+            const stats = await fs.stat(fullPath);
+            return res.json({ message: 'Word document saved successfully', size: formatFileSize(stats.size) });
+        }
+
+        if (type === 'xlsx') {
+            if (!Array.isArray(sheets) || sheets.length === 0) {
+                return res.status(400).json({ error: 'Sheets data required' });
+            }
+            const XLSX = require('xlsx');
+            const workbook = XLSX.utils.book_new();
+            for (const sheet of sheets) {
+                const rows = Array.isArray(sheet.data) ? sheet.data : [];
+                const ws = XLSX.utils.aoa_to_sheet(rows);
+                XLSX.utils.book_append_sheet(workbook, ws, (sheet.name || 'Sheet1').slice(0, 31));
+            }
+            XLSX.writeFile(workbook, fullPath);
+            await setFilePermissions(fullPath);
+            const stats = await fs.stat(fullPath);
+            return res.json({ message: 'Spreadsheet saved successfully', size: formatFileSize(stats.size) });
+        }
+
+        return res.status(400).json({ error: 'Unsupported edit type' });
+    } catch (error) {
+        console.error('Save error:', error);
+        res.status(500).json({ error: 'Save failed: ' + error.message });
     }
 });
 
@@ -721,14 +992,12 @@ app.get('/api/preview', requireAuth, async (req, res) => {
 app.post('/api/copy', requireAuth, async (req, res) => {
     try {
         const { files, destination } = req.body;
-        if (!files || !Array.isArray(files) || !destination) {
+        if (!files || !Array.isArray(files) || destination === undefined || destination === null) {
             return res.status(400).json({ error: 'Files array and destination required' });
         }
 
-        const destPath = path.join(STORAGE_DIR, destination);
-        
-        // Security check
-        if (!destPath.startsWith(STORAGE_DIR)) {
+        const destPath = resolveSafePath(STORAGE_DIR, destination || '');
+        if (!destPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -736,14 +1005,12 @@ app.post('/api/copy', requireAuth, async (req, res) => {
         await setFilePermissions(destPath);
 
         for (const filePath of files) {
-            const sourcePath = path.join(STORAGE_DIR, filePath);
-            const fileName = path.basename(filePath);
-            const targetPath = path.join(destPath, fileName);
-
-            // Security check
-            if (!sourcePath.startsWith(STORAGE_DIR)) {
+            const sourcePath = resolveSafePath(STORAGE_DIR, filePath);
+            if (!sourcePath) {
                 return res.status(403).json({ error: 'Access denied' });
             }
+            const fileName = path.basename(filePath);
+            const targetPath = path.join(destPath, fileName);
 
             if (fs.existsSync(sourcePath)) {
                 const stats = await getFileStats(sourcePath);
@@ -768,14 +1035,12 @@ app.post('/api/copy', requireAuth, async (req, res) => {
 app.post('/api/move', requireAuth, async (req, res) => {
     try {
         const { files, destination } = req.body;
-        if (!files || !Array.isArray(files) || !destination) {
+        if (!files || !Array.isArray(files) || destination === undefined || destination === null) {
             return res.status(400).json({ error: 'Files array and destination required' });
         }
 
-        const destPath = path.join(STORAGE_DIR, destination);
-        
-        // Security check
-        if (!destPath.startsWith(STORAGE_DIR)) {
+        const destPath = resolveSafePath(STORAGE_DIR, destination || '');
+        if (!destPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -783,14 +1048,12 @@ app.post('/api/move', requireAuth, async (req, res) => {
         await setFilePermissions(destPath);
 
         for (const filePath of files) {
-            const sourcePath = path.join(STORAGE_DIR, filePath);
-            const fileName = path.basename(filePath);
-            const targetPath = path.join(destPath, fileName);
-
-            // Security check
-            if (!sourcePath.startsWith(STORAGE_DIR)) {
+            const sourcePath = resolveSafePath(STORAGE_DIR, filePath);
+            if (!sourcePath) {
                 return res.status(403).json({ error: 'Access denied' });
             }
+            const fileName = path.basename(filePath);
+            const targetPath = path.join(destPath, fileName);
 
             if (fs.existsSync(sourcePath)) {
                 const stats = await getFileStats(sourcePath);
@@ -821,10 +1084,8 @@ app.post('/api/compress', requireAuth, async (req, res) => {
 
         const zipFileName = zipName || 'archive.zip';
         const destPath = destination || '';
-        const zipPath = path.join(STORAGE_DIR, destPath, zipFileName);
-        
-        // Security check
-        if (!zipPath.startsWith(STORAGE_DIR)) {
+        const zipPath = resolveSafePath(STORAGE_DIR, destPath, zipFileName);
+        if (!zipPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -872,10 +1133,8 @@ app.post('/api/compress', requireAuth, async (req, res) => {
         for (const filePath of files) {
             if (hasError) break;
             
-            const fullPath = path.join(STORAGE_DIR, filePath);
-            
-            // Security check
-            if (!fullPath.startsWith(STORAGE_DIR)) {
+            const fullPath = resolveSafePath(STORAGE_DIR, filePath);
+            if (!fullPath) {
                 if (!res.headersSent) {
                     return res.status(403).json({ error: 'Access denied' });
                 }
@@ -999,13 +1258,11 @@ async function fixHtmlFiles(directory) {
                 let modified = false;
                 
                 // Fix absolute URLs in src, href attributes (only for your domain)
-                // Pattern: src="https://creative.reachableads.com/lyx/full_animation/Comp_M_1.png" -> src="/lyx/1-6-26/full%20animation/Comp_M_1.png"
                 // Keep external URLs (CDN, etc.) unchanged
                 content = content.replace(/(src|href)\s*=\s*["']https?:\/\/([^\/]+)(\/[^"']*)["']/gi, (match, attr, domain, filePath) => {
-                    // Only convert URLs from your domain
-                    if (domain === 'creative.reachableads.com' || domain === 'www.creative.reachableads.com') {
+                    const host = domain.toLowerCase();
+                    if (FRONTEND_HOSTS.includes(host) || FRONTEND_HOSTS.includes(host.replace(/^www\./, '')) || FRONTEND_HOSTS.includes(`www.${host}`)) {
                         modified = true;
-                        // Encode spaces in the path
                         const encodedPath = encodeUrlPath(filePath);
                         return `${attr}="${encodedPath}"`;
                     }
@@ -1013,10 +1270,9 @@ async function fixHtmlFiles(directory) {
                 });
                 
                 // Fix absolute URLs in CSS url() functions (only for your domain)
-                // Pattern: url(https://creative.reachableads.com/path/file.png) -> url(/path/file.png)
                 content = content.replace(/url\s*\(\s*["']?https?:\/\/([^\/]+)(\/[^"')]*)["']?\s*\)/gi, (match, domain, filePath) => {
-                    // Only convert URLs from your domain
-                    if (domain === 'creative.reachableads.com' || domain === 'www.creative.reachableads.com') {
+                    const host = domain.toLowerCase();
+                    if (FRONTEND_HOSTS.includes(host) || FRONTEND_HOSTS.includes(host.replace(/^www\./, '')) || FRONTEND_HOSTS.includes(`www.${host}`)) {
                         modified = true;
                         const encodedPath = encodeUrlPath(filePath);
                         return `url(${encodedPath})`;
@@ -1025,10 +1281,9 @@ async function fixHtmlFiles(directory) {
                 });
                 
                 // Fix absolute URLs in JavaScript strings (only for your domain)
-                // Pattern: "https://creative.reachableads.com/path/file.png" -> "/path/file.png"
                 content = content.replace(/(["'])(https?:\/\/([^\/]+))(\/[^"']*)\1/g, (match, quote, fullDomain, domain, filePath) => {
-                    // Only convert URLs from your domain
-                    if (domain === 'creative.reachableads.com' || domain === 'www.creative.reachableads.com') {
+                    const host = domain.toLowerCase();
+                    if (FRONTEND_HOSTS.includes(host) || FRONTEND_HOSTS.includes(host.replace(/^www\./, '')) || FRONTEND_HOSTS.includes(`www.${host}`)) {
                         modified = true;
                         const encodedPath = encodeUrlPath(filePath);
                         return `${quote}${encodedPath}${quote}`;
@@ -1109,10 +1364,8 @@ app.post('/api/fix-html', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Directory path required' });
         }
 
-        const fullDirPath = path.join(STORAGE_DIR, directory);
-        
-        // Security check
-        if (!fullDirPath.startsWith(STORAGE_DIR)) {
+        const fullDirPath = resolveSafePath(STORAGE_DIR, directory);
+        if (!fullDirPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -1132,15 +1385,13 @@ app.post('/api/fix-html', requireAuth, async (req, res) => {
 app.post('/api/extract', requireAuth, async (req, res) => {
     try {
         const { archivePath, destination } = req.body;
-        if (!archivePath || !destination) {
+        if (!archivePath || destination === undefined || destination === null) {
             return res.status(400).json({ error: 'Archive path and destination required' });
         }
 
-        const fullArchivePath = path.join(STORAGE_DIR, archivePath);
-        const destPath = path.join(STORAGE_DIR, destination);
-        
-        // Security check
-        if (!fullArchivePath.startsWith(STORAGE_DIR) || !destPath.startsWith(STORAGE_DIR)) {
+        const fullArchivePath = resolveSafePath(STORAGE_DIR, archivePath);
+        const destPath = resolveSafePath(STORAGE_DIR, destination || '');
+        if (!fullArchivePath || !destPath) {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -1205,10 +1456,8 @@ app.get('*', async (req, res, next) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    const fullPath = path.join(STORAGE_DIR, requestedPath);
-    
-    // Security check - ensure path is within STORAGE_DIR
-    if (!fullPath.startsWith(STORAGE_DIR)) {
+    const fullPath = resolveSafePath(STORAGE_DIR, requestedPath);
+    if (!fullPath) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -1299,20 +1548,20 @@ app.get('*', async (req, res, next) => {
 // This runs after the storage file serving route (which calls next() if file not found)
 app.get('*', (req, res) => {
   // If this is a file request (has extension), return 404
-  // Otherwise, redirect to frontend for React app routes
+  // Otherwise, serve React SPA or point to frontend URL
   const hasExtension = /\.[^/]+$/.test(req.path);
   
   if (hasExtension) {
-    // File not found - return 404
     res.status(404).json({ error: 'File not found' });
   } else {
-    // Likely a React app route - redirect to frontend
     const indexPath = path.join(__dirname, 'dist', 'index.html');
     if (fs.existsSync(indexPath)) {
-      res.redirect(302, 'https://creative.reachableads.com');
-    } else {
-      res.status(404).send('Please go to https://creative.reachableads.com to access the file manager');
+      return res.sendFile(indexPath);
     }
+    if (FRONTEND_URL) {
+      return res.redirect(302, FRONTEND_URL);
+    }
+    res.status(404).send('Frontend build not found. Run npm run build, or set FRONTEND_URL.');
   }
 });
 
@@ -1323,13 +1572,19 @@ app.use((error, req, res, next) => {
             return res.status(413).json({ error: 'File too large' });
         }
     }
+    // CORS errors
+    if (error && error.message === 'Not allowed by CORS') {
+        return res.status(403).json({ error: 'CORS blocked' });
+    }
     res.status(500).json({ error: error.message });
 });
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`🚀 Reachable File Manager server running on http://localhost:${PORT}`);
+    console.log(`🚀 CrowdWork360 File Manager running on http://localhost:${PORT}`);
     console.log(`📁 Storage directory: ${STORAGE_DIR}`);
+    if (FRONTEND_URL) console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
+    console.log(`🍪 Cookie sameSite=${sessionCookie.sameSite}${COOKIE_DOMAIN ? ` domain=${COOKIE_DOMAIN}` : ' (host-only)'}`);
     
     // Print .env file path
     const envFilePath = path.join(__dirname, '.env');

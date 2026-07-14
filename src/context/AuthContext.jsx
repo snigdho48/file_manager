@@ -19,12 +19,9 @@ export const AuthProvider = ({ children }) => {
   // Configure axios defaults
   axios.defaults.withCredentials = true
   
-  // API base URL configuration
-  // Priority: window.APP_CONFIG.API_URL > VITE_API_URL env var > default
-  // For separate deployment: Set window.APP_CONFIG.API_URL in public/config.js
-  // Production: Uses https://api.creative.reachableads.com (from config.js)
+  // API base URL: runtime config.js > VITE_API_URL > localhost (dev) / same-origin (prod)
+  // Prefer empty API_URL in production so nginx /api proxy keeps cookies same-site.
   const getApiBaseURL = () => {
-    // 1. Check for runtime config (from dist/config.js - can be changed after build)
     if (typeof window !== 'undefined' && window.APP_CONFIG?.API_URL) {
       const apiUrl = window.APP_CONFIG.API_URL.trim()
       if (apiUrl) {
@@ -32,14 +29,10 @@ export const AuthProvider = ({ children }) => {
       }
     }
     
-    // 2. Check for build-time environment variable (embedded in code during build)
     if (import.meta.env.VITE_API_URL) {
       return import.meta.env.VITE_API_URL.trim()
     }
     
-    // 3. Default behavior
-    // Development: Use localhost (Vite proxy will handle /api/*)
-    // Production: Empty string = relative URLs (same origin)
     return import.meta.env.DEV ? 'http://localhost:3000' : ''
   }
   

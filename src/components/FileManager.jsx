@@ -40,6 +40,7 @@ const FileManager = () => {
     uploadFiles,
     downloadFile,
     previewFile,
+    saveFile,
     copyFilesToClipboard,
     cutFilesToClipboard,
     pasteFilesFromClipboard,
@@ -405,6 +406,13 @@ const FileManager = () => {
           file={previewData}
           onClose={() => setShowPreviewModal(false)}
           onDownload={() => downloadFile(previewData.path)}
+          onSave={async (payload) => {
+            const result = await saveFile(payload)
+            // Refresh metadata size in modal header after save
+            if (result?.size) {
+              setPreviewData((prev) => prev ? { ...prev, size: result.size } : prev)
+            }
+          }}
         />
       )}
 

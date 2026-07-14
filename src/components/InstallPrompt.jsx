@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Download, X } from 'lucide-react'
+import BrandLogo from './BrandLogo'
 
 const InstallPrompt = () => {
   const [deferredPrompt, setDeferredPrompt] = useState(null)
@@ -129,11 +130,11 @@ const InstallPrompt = () => {
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-4 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 flex-1 min-w-0">
           <div className="flex-shrink-0">
-            <img src="/icon.png" alt="App Icon" className="w-10 h-10 rounded-lg" />
+            <BrandLogo className="w-10 h-10 rounded-lg" />
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium text-gray-900 dark:text-white">
-              Install App
+              Install CrowdWork360
             </p>
             <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
               Install for quick access

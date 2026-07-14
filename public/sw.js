@@ -1,13 +1,13 @@
-// Service Worker for Reachable File Manager
-const CACHE_NAME = 'reachable-file-manager-v3';
-const RUNTIME_CACHE = 'reachable-file-manager-runtime-v3';
+// Service Worker for CrowdWork360 File Manager
+const CACHE_NAME = 'crowdwork360-file-manager-v1';
+const RUNTIME_CACHE = 'crowdwork360-file-manager-runtime-v1';
 
 // Assets to cache on install
 const STATIC_ASSETS = [
   '/',
   '/index.html',
+  '/logo.svg',
   '/icon.png',
-  '/favicon.ico',
   '/manifest.json',
   '/config.js'
 ];
