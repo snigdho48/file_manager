@@ -1,4 +1,4 @@
-# Deploy Guide — Reachable File Manager
+# Deploy Guide — CrowdWork360 File Manager
 
 One-click install on a fresh Ubuntu/Debian server (nginx + SSL + PM2).
 
@@ -7,46 +7,51 @@ One-click install on a fresh Ubuntu/Debian server (nginx + SSL + PM2).
 - Ubuntu 20.04+ / Debian 11+ (root/sudo)
 - A domain with DNS **A** records pointing at this server:
   - Frontend: e.g. `files.example.com`
-  - API: e.g. `api.files.example.com` (default suggested by the script)
+  - API: e.g. `api.files.example.com`
 - Ports **80** and **443** open
 
 ## One-click deploy
-
-From the `mainFile` folder on the server:
 
 ```bash
 cd /path/to/your/repo/mainFile
 sudo bash deploy.sh
 ```
 
-The script will ask in the terminal:
+The script asks for:
 
-1. **FRONTEND_URL** — e.g. `https://creative.reachableads.com`  
-   - Leave **empty** to keep the existing value in `.env` (no change)  
-   - Enter a new URL/domain to update `.env`  
-2. **API domain** (default `api.<frontend>`)  
-3. **Admin username / password** (empty password keeps current)
+```text
+DEPLOY_FRONTEND_URL=
+DEPLOY_BACKEND_DOMAIN=
+```
 
-Then it will:
+**Examples you can type:**
 
-- Install Node.js, nginx, certbot, build tools  
-- `npm install` + build the React app  
-- Create storage + nginx-friendly symlinks under `/var/www/creative`  
-- Write `.env` and `dist/config.js` for your domains  
-- Configure nginx (frontend + API), request Let’s Encrypt certs  
-- Start the API with PM2 and open the firewall  
+```text
+DEPLOY_FRONTEND_URL=https://files.example.com
+DEPLOY_BACKEND_DOMAIN=api.files.example.com
+```
 
-When finished, open `https://your-frontend-domain`.
+Or just the values:
 
-### Non-interactive (CI / automation)
+```text
+https://files.example.com
+api.files.example.com
+```
+
+| Input | Empty Enter |
+|--------|-------------|
+| `DEPLOY_FRONTEND_URL` | Keep existing `FRONTEND_URL` in `.env` (required on first deploy) |
+| `DEPLOY_BACKEND_DOMAIN` | Use `api.<frontend-domain>` (or last deploy value) |
+
+Then: username / password → confirm → full install.
+
+### Non-interactive (optional)
 
 ```bash
 sudo DEPLOY_FRONTEND_URL=https://files.example.com \
      DEPLOY_BACKEND_DOMAIN=api.files.example.com \
      bash deploy.sh
 ```
-
-Leave `DEPLOY_FRONTEND_URL` unset and press Enter at the prompt to keep the existing `.env` `FRONTEND_URL`.
 
 ## How traffic works
 

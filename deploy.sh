@@ -78,30 +78,40 @@ domain_from_url() {
     echo "$1" | sed -E 's#^https?://##; s#/.*##; s/[[:space:]]+//g' | tr '[:upper:]' '[:lower:]'
 }
 
-# ---------- Prompt for FRONTEND_URL ----------
+# ---------- Interactive deploy inputs ----------
+# Same vars as non-interactive:
+#   DEPLOY_FRONTEND_URL=https://files.example.com
+#   DEPLOY_BACKEND_DOMAIN=api.files.example.com
 EXISTING_FRONTEND_URL="$(read_env_var FRONTEND_URL)"
 EXISTING_SESSION_SECRET="$(read_env_var SESSION_SECRET)"
 EXISTING_FM_USERNAME="$(read_env_var FM_USERNAME)"
 EXISTING_FM_PASSWORD="$(read_env_var FM_PASSWORD)"
-EXISTING_FRONTEND_HOSTS="$(read_env_var FRONTEND_HOSTS)"
 
-echo -e "${YELLOW}FRONTEND_URL for CORS / app links (written to .env)${NC}"
-if [ -n "$EXISTING_FRONTEND_URL" ]; then
-    echo -e "  Current: ${CYAN}${EXISTING_FRONTEND_URL}${NC}"
-    echo -e "  ${YELLOW}Leave empty to keep the current value.${NC}"
-else
-    echo -e "  Example: ${CYAN}https://creative.reachableads.com${NC}"
+EXISTING_BACKEND_HINT=""
+if [ -f "$PROJECT_DIR/.deploy-info" ]; then
+    EXISTING_BACKEND_HINT="$(grep -E '^BACKEND_DOMAIN=' "$PROJECT_DIR/.deploy-info" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')"
 fi
 
+echo -e "${YELLOW}Enter deploy settings (or press Enter to keep / use defaults)${NC}"
+echo -e "  Example:"
+echo -e "    ${CYAN}DEPLOY_FRONTEND_URL=https://files.example.com${NC}"
+echo -e "    ${CYAN}DEPLOY_BACKEND_DOMAIN=api.files.example.com${NC}"
+echo ""
+
+# --- DEPLOY_FRONTEND_URL ---
 if [ -n "${DEPLOY_FRONTEND_URL:-}" ]; then
     FRONTEND_URL_INPUT="$DEPLOY_FRONTEND_URL"
-elif [ -n "${DEPLOY_FRONTEND_DOMAIN:-}" ]; then
-    FRONTEND_URL_INPUT="$DEPLOY_FRONTEND_DOMAIN"
+    echo -e "${GREEN}Using env DEPLOY_FRONTEND_URL=${DEPLOY_FRONTEND_URL}${NC}"
 else
-    read -r -p "$(echo -e ${CYAN}FRONTEND_URL${NC}: )" FRONTEND_URL_INPUT
+    if [ -n "$EXISTING_FRONTEND_URL" ]; then
+        echo -e "  Current .env FRONTEND_URL: ${CYAN}${EXISTING_FRONTEND_URL}${NC}"
+        echo -e "  ${YELLOW}Leave empty to keep it unchanged.${NC}"
+    fi
+    read -r -p "$(echo -e ${CYAN}DEPLOY_FRONTEND_URL${NC}=)" FRONTEND_URL_INPUT
 fi
 
-FRONTEND_URL_INPUT="$(echo "${FRONTEND_URL_INPUT:-}" | sed -E 's/[[:space:]]+//g')"
+# Allow paste like "DEPLOY_FRONTEND_URL=https://..." or just the URL/domain
+FRONTEND_URL_INPUT="$(echo "${FRONTEND_URL_INPUT:-}" | sed -E 's/^DEPLOY_FRONTEND_URL=//; s/[[:space:]]+//g')"
 
 if [ -n "$FRONTEND_URL_INPUT" ]; then
     FRONTEND_URL="$(normalize_frontend_url "$FRONTEND_URL_INPUT")"
@@ -112,36 +122,39 @@ elif [ -n "$EXISTING_FRONTEND_URL" ]; then
     UPDATE_FRONTEND_URL=0
     echo -e "${GREEN}✓ Keeping existing FRONTEND_URL=${FRONTEND_URL}${NC}"
 else
-    echo -e "${RED}No FRONTEND_URL entered and none in .env — required on first deploy.${NC}"
+    echo -e "${RED}DEPLOY_FRONTEND_URL is required on first deploy (none in .env).${NC}"
+    echo -e "${YELLOW}Example: https://files.example.com${NC}"
     exit 1
 fi
 
 FRONTEND_DOMAIN="$(domain_from_url "$FRONTEND_URL")"
 if [ -z "$FRONTEND_DOMAIN" ]; then
-    echo -e "${RED}Could not parse domain from FRONTEND_URL=${FRONTEND_URL}${NC}"
+    echo -e "${RED}Could not parse domain from DEPLOY_FRONTEND_URL=${FRONTEND_URL}${NC}"
     exit 1
 fi
 
-DEFAULT_API="api.${FRONTEND_DOMAIN}"
-EXISTING_BACKEND_HINT=""
-if [ -f "$PROJECT_DIR/.deploy-info" ]; then
-    EXISTING_BACKEND_HINT="$(grep -E '^BACKEND_DOMAIN=' "$PROJECT_DIR/.deploy-info" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')"
+DEFAULT_API="${EXISTING_BACKEND_HINT:-api.${FRONTEND_DOMAIN}}"
+
+# --- DEPLOY_BACKEND_DOMAIN ---
+echo ""
+if [ -n "${DEPLOY_BACKEND_DOMAIN:-}" ]; then
+    BACKEND_INPUT="$DEPLOY_BACKEND_DOMAIN"
+    echo -e "${GREEN}Using env DEPLOY_BACKEND_DOMAIN=${DEPLOY_BACKEND_DOMAIN}${NC}"
+else
+    echo -e "  Default API host: ${CYAN}${DEFAULT_API}${NC}"
+    echo -e "  ${YELLOW}Leave empty to use the default.${NC}"
+    read -r -p "$(echo -e ${CYAN}DEPLOY_BACKEND_DOMAIN${NC}=)" BACKEND_INPUT
 fi
 
-if [ -n "${DEPLOY_BACKEND_DOMAIN:-}" ]; then
-    BACKEND_DOMAIN="$(domain_from_url "$(normalize_frontend_url "$DEPLOY_BACKEND_DOMAIN")")"
-else
-    echo ""
-    echo -e "${YELLOW}API domain for nginx (separate host). Leave empty for default.${NC}"
-    if [ -n "$EXISTING_BACKEND_HINT" ]; then
-        read -r -p "$(echo -e ${CYAN}API domain${NC} [${EXISTING_BACKEND_HINT}]: )" BACKEND_INPUT
-        BACKEND_INPUT="${BACKEND_INPUT:-$EXISTING_BACKEND_HINT}"
-    else
-        read -r -p "$(echo -e ${CYAN}API domain${NC} [${DEFAULT_API}]: )" BACKEND_INPUT
-        BACKEND_INPUT="${BACKEND_INPUT:-$DEFAULT_API}"
-    fi
-    BACKEND_DOMAIN="$(domain_from_url "$(normalize_frontend_url "$BACKEND_INPUT")")"
+BACKEND_INPUT="$(echo "${BACKEND_INPUT:-}" | sed -E 's/^DEPLOY_BACKEND_DOMAIN=//; s/[[:space:]]+//g')"
+BACKEND_INPUT="${BACKEND_INPUT:-$DEFAULT_API}"
+BACKEND_DOMAIN="$(domain_from_url "$(normalize_frontend_url "$BACKEND_INPUT")")"
+
+if [ -z "$BACKEND_DOMAIN" ]; then
+    echo -e "${RED}Invalid DEPLOY_BACKEND_DOMAIN${NC}"
+    exit 1
 fi
+echo -e "${GREEN}✓ DEPLOY_BACKEND_DOMAIN=${BACKEND_DOMAIN}${NC}"
 
 # Cookie domain: parent of frontend (optional; same-origin /api is default)
 derive_cookie_domain() {
@@ -187,9 +200,9 @@ NGINX_BACKEND_ENABLED="/etc/nginx/sites-enabled/${BACKEND_DOMAIN}"
 
 echo ""
 echo -e "${GREEN}Will deploy:${NC}"
-echo -e "  FRONTEND_URL: ${CYAN}${FRONTEND_URL}${NC}$([ "$UPDATE_FRONTEND_URL" = "1" ] && echo " (updating .env)" || echo " (unchanged in .env)")"
-echo -e "  API:          ${CYAN}${BACKEND_URL}${NC} (nginx → localhost:3000)"
-echo -e "  Same-origin /api proxy on frontend (recommended)"
+echo -e "  DEPLOY_FRONTEND_URL=${CYAN}${FRONTEND_URL}${NC}$([ "$UPDATE_FRONTEND_URL" = "1" ] && echo " → update .env" || echo " → keep .env")"
+echo -e "  DEPLOY_BACKEND_DOMAIN=${CYAN}${BACKEND_DOMAIN}${NC}"
+echo -e "  API URL: ${CYAN}${BACKEND_URL}${NC} (nginx → localhost:3000)"
 echo ""
 read -r -p "Continue? [Y/n]: " CONFIRM
 CONFIRM="${CONFIRM:-Y}"
